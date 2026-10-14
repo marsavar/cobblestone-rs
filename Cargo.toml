@@ -1,0 +1,42 @@
+[package]
+name = "cobblestone"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "BSD-3-Clause"
+description = "Cobblestone-128 chunked encryption (c2sp.org/chunked-encryption), interoperable with the Go, Python and TypeScript implementations"
+keywords = ["cobblestone", "encryption", "streaming", "chunked", "aes-gcm"]
+categories = ["cryptography"]
+publish = false
+
+[dependencies]
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
+getrandom = "0.4"
+hmac = "0.13"
+pin-project-lite = { version = "0.2", optional = true }
+sha2 = "0.11"
+subtle = "2"
+tokio = { version = "1", default-features = false, features = ["io-util"], optional = true }
+zeroize = "1"
+
+[features]
+tokio = ["dep:tokio", "dep:pin-project-lite"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dev-dependencies]
+flate2 = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "fs", "io-std"] }
+
+# AES-GCM is very slow without optimizations, and the test vectors include
+# multi-MiB messages.
+[profile.test.package."*"]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
