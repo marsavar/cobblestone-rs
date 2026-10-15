@@ -84,9 +84,10 @@ fn check_invalid_key(v: &Vector) {
     // Keys are validated when a Key is created, so no API can be called with
     // an invalid key.
     assert_ne!(v.key.len(), cobblestone::KEY_SIZE);
+    let err = Key::try_from(&v.key[..]).unwrap_err();
     assert_eq!(
-        Key::try_from(&v.key[..]),
-        Err(Error::InvalidKeySize(v.key.len())),
+        err.to_string(),
+        format!("invalid key size: {} bytes, expected 16", v.key.len()),
         "{}",
         v.name
     );
@@ -99,7 +100,7 @@ fn check_valid(v: &Vector) {
         if piece == 1 && v.ct.len() > 1 << 20 {
             continue;
         }
-        let mut r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, piece)).unwrap();
+        let mut r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, piece));
         let mut msg = Vec::new();
         r.read_to_end(&mut msg).unwrap();
         v.check_message(&msg);
@@ -108,7 +109,12 @@ fn check_valid(v: &Vector) {
     }
 
     let mut r = RandomAccessDecryptor::new(&v.input_key(), &v.ctx, Cursor::new(&v.ct)).unwrap();
-    assert_eq!(r.len(), v.msg_length.unwrap() as u64, "{}", v.name);
+    assert_eq!(
+        r.plaintext_len(),
+        v.msg_length.unwrap() as u64,
+        "{}",
+        v.name
+    );
     let mut msg = Vec::new();
     r.read_to_end(&mut msg).unwrap();
     v.check_message(&msg);
@@ -167,7 +173,7 @@ fn check_round_trip(v: &Vector) {
     assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
     v.check_message(&decrypt(&v.input_key(), &v.ctx, &ct).unwrap());
 
-    let mut w = EncryptWriter::new(&v.input_key(), &v.ctx, Vec::new()).unwrap();
+    let mut w = EncryptWriter::new(&v.input_key(), &v.ctx, Vec::new());
     for piece in msg.chunks(1000) {
         w.write_all(piece).unwrap();
     }
@@ -200,14 +206,16 @@ fn check_invalid(v: &Vector) {
         // Rejected before any chunk is decrypted, and without any output.
         let err = decrypt(&v.input_key(), &v.ctx, &v.ct).unwrap_err();
         assert!(is_header_error(&err), "{}: {err}", v.name);
-        let err = DecryptReader::new(&v.input_key(), &v.ctx, &v.ct[..])
-            .err()
-            .unwrap();
+        // The header is checked on the first read, before any output.
+        let r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, 7));
+        let (data, err) = read_until_error(r);
+        let err = err.expect("decryption succeeded");
         assert!(
             is_header_error(cobblestone_error(&err)),
             "{}: {err}",
             v.name
         );
+        assert!(data.is_empty(), "{}", v.name);
         let err = RandomAccessDecryptor::new(&v.input_key(), &v.ctx, Cursor::new(&v.ct))
             .err()
             .unwrap();
@@ -225,7 +233,7 @@ fn check_invalid(v: &Vector) {
         if piece == 1 && v.ct.len() > 1 << 20 {
             continue;
         }
-        let r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, piece)).unwrap();
+        let r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, piece));
         let (data, err) = read_until_error(r);
         assert!(err.is_some(), "{}: decryption succeeded", v.name);
         v.check_prefix(&data);
@@ -258,7 +266,10 @@ fn check_invalid(v: &Vector) {
 #[cfg(feature = "tokio")]
 mod tokio_tests {
     use super::*;
-    use cobblestone::tokio::{AsyncDecryptReader, AsyncEncryptReader, AsyncEncryptWriter};
+    use cobblestone::tokio::{
+        DecryptReader as AsyncDecryptReader, EncryptReader as AsyncEncryptReader,
+        EncryptWriter as AsyncEncryptWriter,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn block_on<F: Future>(f: F) -> F::Output {
@@ -412,7 +423,7 @@ fn partial_writes() {
         out: Vec::new(),
         interrupt: false,
     };
-    let mut w = EncryptWriter::new(&key, b"", sink).unwrap();
+    let mut w = EncryptWriter::new(&key, b"", sink);
     w.write_all(&msg).unwrap();
     w.flush().unwrap();
     let ct = w.finish().unwrap().out;
@@ -431,7 +442,17 @@ fn writer_reports_sink_errors() {
         }
     }
     let key = Key::generate();
-    assert!(EncryptWriter::new(&key, b"", Broken).is_err());
+    let mut w = EncryptWriter::new(&key, b"", Broken);
+    assert!(w.write(b"x").is_err());
+    // The error is sticky: the ciphertext is incomplete.
+    assert!(w.finish().is_err());
+}
+
+#[test]
+fn empty_writer_produces_valid_ciphertext() {
+    let key = Key::generate();
+    let ct = EncryptWriter::new(&key, b"", Vec::new()).finish().unwrap();
+    assert_eq!(decrypt(&key, b"", &ct).unwrap(), b"");
 }
 
 #[cfg(feature = "tokio")]
@@ -484,7 +505,7 @@ fn async_writer_with_pending_sink() {
         .build()
         .unwrap()
         .block_on(async {
-            let mut w = cobblestone::tokio::AsyncEncryptWriter::new(&key, b"x", sink);
+            let mut w = cobblestone::tokio::EncryptWriter::new(&key, b"x", sink);
             w.write_all(&msg).await.unwrap();
             w.flush().await.unwrap();
             w.shutdown().await.unwrap();
@@ -493,4 +514,155 @@ fn async_writer_with_pending_sink() {
         });
     assert!(sink.shut_down);
     assert_eq!(decrypt(&key, b"x", &sink.out).unwrap(), msg);
+}
+
+/// A reader that returns at most `piece` bytes per read, and fails every
+/// other read with `kind`.
+struct Flaky<'a> {
+    data: &'a [u8],
+    piece: usize,
+    fail: bool,
+    kind: io::ErrorKind,
+}
+
+fn flaky(data: &[u8], piece: usize, kind: io::ErrorKind) -> Flaky<'_> {
+    Flaky {
+        data,
+        piece,
+        fail: false,
+        kind,
+    }
+}
+
+impl Read for Flaky<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.fail = !self.fail;
+        if self.fail {
+            return Err(self.kind.into());
+        }
+        let n = self.data.len().min(self.piece).min(buf.len());
+        buf[..n].copy_from_slice(&self.data[..n]);
+        self.data = &self.data[n..];
+        Ok(n)
+    }
+}
+
+/// Reads to the end into a buffer of `buf_len` bytes, retrying `WouldBlock`
+/// like a caller polling a non-blocking source would.
+fn read_retrying(mut r: impl Read, buf_len: usize) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = vec![0; buf_len];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => return Ok(out),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Message lengths around the chunk boundaries.
+const BOUNDARY_LENGTHS: [usize; 7] = [0, 1, 16383, 16384, 16385, 32768, 40000];
+
+fn message(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i * 31) as u8).collect()
+}
+
+#[test]
+fn readers_resume_after_transient_errors() {
+    let key = Key::generate();
+    for len in BOUNDARY_LENGTHS {
+        let msg = message(len);
+        let ct = encrypt(&key, b"ctx", &msg).unwrap();
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::Interrupted] {
+            // Interrupted is retried inside the reader, and WouldBlock by the
+            // caller. Either way, no data may be lost or duplicated.
+            let r = DecryptReader::new(&key, b"ctx", flaky(&ct, 7, kind));
+            assert_eq!(read_retrying(r, 4096).unwrap(), msg, "{kind:?}, {len}");
+
+            let r = EncryptReader::new(&key, b"ctx", flaky(&msg, 7, kind));
+            let ct = read_retrying(r, 4096).unwrap();
+            assert_eq!(decrypt(&key, b"ctx", &ct).unwrap(), msg, "{kind:?}, {len}");
+        }
+    }
+}
+
+#[test]
+fn one_byte_buffers() {
+    let key = Key::generate();
+    for len in BOUNDARY_LENGTHS {
+        let msg = message(len);
+        let ct = encrypt(&key, b"ctx", &msg).unwrap();
+
+        let r = DecryptReader::new(&key, b"ctx", &ct[..]);
+        assert_eq!(read_retrying(r, 1).unwrap(), msg, "decrypt, {len}");
+
+        let r = EncryptReader::new(&key, b"ctx", &msg[..]);
+        let ct = read_retrying(r, 1).unwrap();
+        assert_eq!(
+            decrypt(&key, b"ctx", &ct).unwrap(),
+            msg,
+            "encrypt reader, {len}"
+        );
+
+        let mut w = EncryptWriter::new(&key, b"ctx", Vec::new());
+        for byte in &msg {
+            w.write_all(std::slice::from_ref(byte)).unwrap();
+        }
+        let ct = w.finish().unwrap();
+        assert_eq!(
+            decrypt(&key, b"ctx", &ct).unwrap(),
+            msg,
+            "encrypt writer, {len}"
+        );
+    }
+}
+
+#[test]
+fn every_message_gets_a_fresh_salt() {
+    // The spec requires that salts never repeat under a key. Encrypting the
+    // same message twice must give different salts, and so different
+    // ciphertexts, through every encryption API.
+    let key = Key::generate();
+    let encryptions: [fn(&Key) -> Vec<u8>; 3] = [
+        |key| encrypt(key, b"", b"same").unwrap(),
+        |key| {
+            let mut w = EncryptWriter::new(key, b"", Vec::new());
+            w.write_all(b"same").unwrap();
+            w.finish().unwrap()
+        },
+        |key| {
+            let mut ct = Vec::new();
+            EncryptReader::new(key, b"", &b"same"[..])
+                .read_to_end(&mut ct)
+                .unwrap();
+            ct
+        },
+    ];
+    for f in encryptions {
+        let (a, b) = (f(&key), f(&key));
+        assert_ne!(a[..24], b[..24], "salt repeated");
+        assert_ne!(a[..24], [0; 24], "salt is all zeros");
+        assert_ne!(a, b);
+    }
+}
+
+#[test]
+fn final_chunk_shorter_than_a_tag_is_truncation() {
+    let key = Key::generate();
+    let ct = encrypt(&key, b"", &message(16384)).unwrap();
+    // The ciphertext is the header, one full chunk, and an empty final chunk
+    // that is just a 16-byte tag. Cut that tag short.
+    for cut in [1, 15] {
+        let truncated = &ct[..ct.len() - cut];
+        assert_eq!(decrypt(&key, b"", truncated), Err(Error::Truncated));
+        let r = DecryptReader::new(&key, b"", truncated);
+        let (data, err) = read_until_error(r);
+        let err = err.expect("decryption succeeded");
+        assert_eq!(cobblestone_error(&err), &Error::Truncated);
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        // The full chunk before it was valid, and may be released.
+        assert!(data.len() <= 16384);
+    }
 }

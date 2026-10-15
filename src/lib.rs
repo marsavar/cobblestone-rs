@@ -15,7 +15,8 @@
 //!
 //! # APIs
 //!
-//! - [`Key`] is a Cobblestone-128 key.
+//! - [`Key`] is a Cobblestone-128 key, and [`InvalidKeySize`] is the error
+//!   for a key of the wrong size.
 //! - [`encrypt`] and [`decrypt`] work on in-memory messages.
 //! - [`EncryptWriter`] and [`EncryptReader`] encrypt a stream, and
 //!   [`DecryptReader`] decrypts one, never releasing unauthenticated
@@ -55,16 +56,20 @@ mod stream;
 #[cfg(test)]
 mod test_vectors;
 
-// Runs the examples in the README as doctests. One of them uses tokio.
-#[cfg(all(doctest, feature = "tokio"))]
+// Runs the examples in the README and docs.md as doctests. One of the
+// docs.md examples uses tokio.
+#[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+#[cfg(all(doctest, feature = "tokio"))]
+#[doc = include_str!("../docs.md")]
+struct DocsDoctests;
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub mod tokio;
 
 pub use io_impl::{DecryptReader, EncryptReader, EncryptWriter, RandomAccessDecryptor};
-pub use key::{KEY_SIZE, Key};
+pub use key::{InvalidKeySize, KEY_SIZE, Key};
 
 use raw::{CHUNK_SIZE, ChunkCipher, Decryptor, ENC_CHUNK_SIZE, Encryptor};
 
@@ -77,21 +82,26 @@ const HEADER_SIZE: usize = SALT_SIZE + COMMITMENT_SIZE;
 ///
 /// When returned through an [`io::Error`] by the streaming APIs, it can be
 /// recovered with [`io::Error::downcast`](https://doc.rust-lang.org/std/io/struct.Error.html#method.downcast).
+///
+/// Creating a [`Key`] from a slice of the wrong size is the only other way
+/// this crate can fail, and that returns [`InvalidKeySize`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// A key was created from a slice that is not [`KEY_SIZE`] bytes long.
-    InvalidKeySize(usize),
     /// The ciphertext was not produced with this key and context, or its
     /// header was modified.
     InvalidCommitment,
-    /// The ciphertext ended early, for example in the middle of the header or
-    /// of a chunk, or without a final short chunk.
+    /// The ciphertext ended early: in the middle of the header, at a chunk
+    /// boundary without a final short chunk, or with a final chunk too short
+    /// to hold an authentication tag.
+    ///
+    /// A ciphertext cut off inside a chunk can't be told apart from a
+    /// modified one, so it returns [`Error::DecryptionFailed`] instead.
     Truncated,
     /// The ciphertext size is not valid for any message.
     InvalidSize,
-    /// A chunk failed to authenticate. The ciphertext was modified, truncated,
-    /// reordered, or has trailing data.
+    /// A chunk failed to authenticate. The ciphertext was modified, cut off
+    /// inside a chunk, reordered, or has trailing data.
     DecryptionFailed {
         /// The index of the chunk that failed to authenticate.
         chunk: u64,
@@ -103,9 +113,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidKeySize(n) => {
-                write!(f, "invalid key size: {n} bytes, expected {KEY_SIZE}")
-            }
             Error::InvalidCommitment => f.write_str("invalid commitment"),
             Error::Truncated => f.write_str("ciphertext is truncated"),
             Error::InvalidSize => f.write_str("invalid ciphertext size"),
@@ -123,7 +130,6 @@ impl From<Error> for io::Error {
     fn from(err: Error) -> io::Error {
         let kind = match err {
             Error::Truncated => io::ErrorKind::UnexpectedEof,
-            Error::InvalidKeySize(_) => io::ErrorKind::InvalidInput,
             Error::MessageTooLarge => io::ErrorKind::Other,
             _ => io::ErrorKind::InvalidData,
         };
@@ -240,10 +246,12 @@ fn seal_into(
 ///
 /// - [`Error::InvalidCommitment`] if the ciphertext was not encrypted with
 ///   this key and context, or its header was modified.
-/// - [`Error::Truncated`] if the ciphertext is shorter than the header, or
-///   ends at a chunk boundary without a final short chunk.
+/// - [`Error::Truncated`] if the ciphertext is shorter than the header, ends
+///   at a chunk boundary without a final short chunk, or ends with a final
+///   chunk too short to hold an authentication tag.
 /// - [`Error::DecryptionFailed`] if a chunk fails to authenticate, because
-///   the ciphertext was modified, truncated, reordered, or has trailing data.
+///   the ciphertext was modified, cut off inside a chunk, reordered, or has
+///   trailing data.
 ///
 /// # Examples
 ///
@@ -383,12 +391,22 @@ mod tests {
             decrypt(&key, b"", &ct[..HEADER_SIZE + ENC_CHUNK_SIZE]),
             Err(Error::Truncated)
         );
+        // A final chunk too short to hold a tag is a truncation, at any index.
+        // (The final chunk of this ciphertext is an empty chunk's tag.)
         assert_eq!(
             decrypt(&key, b"", &ct[..ct.len() - 1]),
-            Err(Error::DecryptionFailed { chunk: 1 })
+            Err(Error::Truncated)
         );
+        for len in [1, TAG_SIZE - 1] {
+            assert_eq!(
+                decrypt(&key, b"", &ct[..HEADER_SIZE + len]),
+                Err(Error::Truncated)
+            );
+        }
+        // Cut off inside a chunk that could hold a tag: indistinguishable from
+        // a modified chunk.
         assert_eq!(
-            decrypt(&key, b"", &ct[..HEADER_SIZE + TAG_SIZE - 1]),
+            decrypt(&key, b"", &ct[..HEADER_SIZE + TAG_SIZE]),
             Err(Error::DecryptionFailed { chunk: 0 })
         );
     }

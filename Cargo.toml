@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "BSD-3-Clause"
+repository = "https://github.com/marsavar/cobblestone-rs"
 description = "Cobblestone-128 chunked encryption (c2sp.org/chunked-encryption), interoperable with the Go, Python and TypeScript implementations"
 keywords = ["cobblestone", "encryption", "streaming", "chunked", "aes-gcm"]
 categories = ["cryptography"]
-publish = false
+# Repository tooling that users of the crate never need.
+exclude = [".github/", "release-please-config.json", ".release-please-manifest.json"]
 
 [dependencies]
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }

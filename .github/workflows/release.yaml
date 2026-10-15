@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # Opens or updates a release pull request that bumps the version in
+      # Cargo.toml and Cargo.lock and updates CHANGELOG.md. Merging it tags
+      # the release and creates the GitHub release.
+      #
+      # Pull requests opened with the default GITHUB_TOKEN don't trigger CI.
+      # To run CI on release pull requests, add a RELEASE_PLEASE_TOKEN secret
+      # holding a fine-grained token with contents and pull request write
+      # access to this repository.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+
+  # Publishes the tagged commit, only when merging the release pull request
+  # has just created a release.
+  publish:
+    name: Publish to crates.io
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_PUBLISH_API_KEY }}

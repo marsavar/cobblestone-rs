@@ -1,5 +1,6 @@
 //! Blocking `std::io` streaming and random access APIs.
 
+use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::task::Poll;
 
@@ -32,37 +33,34 @@ fn unwrap_ready<T>(p: Poll<T>) -> T {
 /// use std::io::Write;
 ///
 /// let key = cobblestone::Key::generate();
-/// let mut w = cobblestone::EncryptWriter::new(&key, b"file.txt", Vec::new())?;
+/// let mut w = cobblestone::EncryptWriter::new(&key, b"file.txt", Vec::new());
 /// w.write_all(b"hello ")?;
 /// w.write_all(b"world")?;
 /// let ciphertext = w.finish()?;
 /// assert_eq!(cobblestone::decrypt(&key, b"file.txt", &ciphertext)?, b"hello world");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub struct EncryptWriter<W: Write> {
+pub struct EncryptWriter<W> {
     inner: W,
     state: stream::EncryptWrite,
 }
 
 impl<W: Write> EncryptWriter<W> {
-    /// Creates a new writer, and immediately writes the ciphertext header to
-    /// `inner`.
+    /// Creates a new writer. The ciphertext header is written to `inner` on
+    /// the first write, flush, or [`finish`](Self::finish).
     ///
     /// The context may be empty, and must match on decryption.
-    ///
-    /// # Errors
-    ///
-    /// Returns any error from writing the header to `inner`.
     ///
     /// # Panics
     ///
     /// Panics if the operating system's random number generator fails, which
     /// doesn't happen on supported platforms.
-    pub fn new(key: &Key, context: &[u8], mut inner: W) -> io::Result<Self> {
+    pub fn new(key: &Key, context: &[u8], inner: W) -> Self {
         let (header, enc) = crate::new_header(key, context);
-        let mut state = stream::EncryptWrite::new(header, enc);
-        unwrap_ready(state.poll_flush_pending(|b| Poll::Ready(inner.write(b))))?;
-        Ok(EncryptWriter { inner, state })
+        EncryptWriter {
+            inner,
+            state: stream::EncryptWrite::new(header, enc),
+        }
     }
 
     /// Writes the final chunk, and returns the inner writer.
@@ -83,12 +81,13 @@ impl<W: Write> EncryptWriter<W> {
     pub fn get_ref(&self) -> &W {
         &self.inner
     }
+}
 
-    /// Returns a mutable reference to the inner writer.
-    ///
-    /// Writing to it directly will corrupt the ciphertext.
-    pub fn get_mut(&mut self) -> &mut W {
-        &mut self.inner
+impl<W: fmt::Debug> fmt::Debug for EncryptWriter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptWriter")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
     }
 }
 
@@ -127,7 +126,7 @@ impl<W: Write> Write for EncryptWriter<W> {
 /// assert_eq!(cobblestone::decrypt(&key, b"", &ciphertext)?, b"hello world");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub struct EncryptReader<R: Read> {
+pub struct EncryptReader<R> {
     inner: R,
     state: stream::EncryptRead,
 }
@@ -149,9 +148,25 @@ impl<R: Read> EncryptReader<R> {
         }
     }
 
+    /// Returns a reference to the inner reader.
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
     /// Returns the inner reader.
+    ///
+    /// Plaintext already read from `inner` but not yet returned as ciphertext
+    /// is lost.
     pub fn into_inner(self) -> R {
         self.inner
+    }
+}
+
+impl<R: fmt::Debug> fmt::Debug for EncryptReader<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptReader")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
     }
 }
 
@@ -164,11 +179,13 @@ impl<R: Read> Read for EncryptReader<R> {
 
 /// Reads ciphertext from an inner reader, and produces the plaintext.
 ///
-/// Plaintext is only returned after the chunk containing it is authenticated,
-/// but if the ciphertext is invalid, a prefix of the message may be returned
-/// before an error. Once an error is returned, all subsequent reads fail. The
-/// end of the message (`Ok(0)`) is only reported after the whole ciphertext is
-/// authenticated, so truncation is always detected.
+/// The header is read and the key commitment is checked on the first read,
+/// before any chunk is decrypted. Plaintext is only returned after the chunk
+/// containing it is authenticated, but if the ciphertext is invalid, a prefix
+/// of the message may be returned before an error. Once an error is returned,
+/// all subsequent reads fail. The end of the message (`Ok(0)`) is only
+/// reported after the whole ciphertext is authenticated, so truncation is
+/// always detected.
 ///
 /// Errors caused by the ciphertext wrap an [`Error`], which can be recovered
 /// with [`io::Error::downcast`](https://doc.rust-lang.org/std/io/struct.Error.html#method.downcast).
@@ -181,46 +198,55 @@ impl<R: Read> Read for EncryptReader<R> {
 /// let key = cobblestone::Key::generate();
 /// let ciphertext = cobblestone::encrypt(&key, b"", b"hello world")?;
 ///
-/// let mut r = cobblestone::DecryptReader::new(&key, b"", &ciphertext[..])?;
+/// let mut r = cobblestone::DecryptReader::new(&key, b"", &ciphertext[..]);
 /// let mut plaintext = String::new();
 /// r.read_to_string(&mut plaintext)?;
 /// assert_eq!(plaintext, "hello world");
 ///
 /// // A truncated ciphertext fails to decrypt.
 /// let truncated = &ciphertext[..ciphertext.len() - 1];
-/// let mut r = cobblestone::DecryptReader::new(&key, b"", truncated)?;
+/// let mut r = cobblestone::DecryptReader::new(&key, b"", truncated);
 /// let err = r.read_to_end(&mut Vec::new()).unwrap_err();
 /// let err = err.downcast::<cobblestone::Error>().unwrap();
 /// assert_eq!(err, cobblestone::Error::DecryptionFailed { chunk: 0 });
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub struct DecryptReader<R: Read> {
+pub struct DecryptReader<R> {
     inner: R,
     state: stream::DecryptRead,
 }
 
 impl<R: Read> DecryptReader<R> {
-    /// Creates a new reader, and immediately reads the ciphertext header from
-    /// `inner` and checks the key commitment.
+    /// Creates a new reader that decrypts the ciphertext read from `inner`.
     ///
-    /// # Errors
-    ///
-    /// Returns an error wrapping:
-    ///
-    /// - [`Error::InvalidCommitment`] if the ciphertext was not encrypted with
-    ///   this key and context, or its header was modified.
-    /// - [`Error::Truncated`] if `inner` ends before the end of the header.
-    ///
-    /// or any error from reading `inner`.
-    pub fn new(key: &Key, context: &[u8], mut inner: R) -> io::Result<Self> {
-        let mut state = stream::DecryptRead::new(key, context);
-        unwrap_ready(state.poll_header(|b| Poll::Ready(inner.read(b))))?;
-        Ok(DecryptReader { inner, state })
+    /// The header is read and checked on the first read, so all errors,
+    /// including [`Error::InvalidCommitment`], are returned by reads.
+    pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
+        DecryptReader {
+            inner,
+            state: stream::DecryptRead::new(key, context),
+        }
+    }
+
+    /// Returns a reference to the inner reader.
+    pub fn get_ref(&self) -> &R {
+        &self.inner
     }
 
     /// Returns the inner reader.
+    ///
+    /// Ciphertext already read from `inner` but not yet returned as plaintext
+    /// is lost.
     pub fn into_inner(self) -> R {
         self.inner
+    }
+}
+
+impl<R: fmt::Debug> fmt::Debug for DecryptReader<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecryptReader")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
     }
 }
 
@@ -253,7 +279,7 @@ impl<R: Read> Read for DecryptReader<R> {
 ///
 /// // In practice, this would usually be a File.
 /// let mut r = cobblestone::RandomAccessDecryptor::new(&key, b"", Cursor::new(ciphertext))?;
-/// assert_eq!(r.len(), 100_000);
+/// assert_eq!(r.plaintext_len(), 100_000);
 ///
 /// // Read 10 bytes at offset 50,000. Only the chunk holding them is decrypted.
 /// let mut buf = [0; 10];
@@ -261,12 +287,12 @@ impl<R: Read> Read for DecryptReader<R> {
 /// assert_eq!(buf, message[50_000..50_010]);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub struct RandomAccessDecryptor<R: Read + Seek> {
+pub struct RandomAccessDecryptor<R> {
     inner: R,
     cipher: ChunkCipher<Aes128Gcm>,
     /// The size of the raw ciphertext, after the header.
     body_size: u64,
-    plaintext_size: u64,
+    plaintext_len: u64,
     pos: u64,
     /// The most recently decrypted chunk.
     cache: Box<[u8]>,
@@ -309,7 +335,7 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
             inner,
             cipher,
             body_size,
-            plaintext_size: body_size - chunks * TAG_SIZE as u64,
+            plaintext_len: body_size - chunks * TAG_SIZE as u64,
             pos: 0,
             cache: vec![0; ENC_CHUNK_SIZE].into_boxed_slice(),
             cache_len: 0,
@@ -319,17 +345,18 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
         Ok(d)
     }
 
-    /// Returns the size of the plaintext.
-    pub fn len(&self) -> u64 {
-        self.plaintext_size
+    /// Returns the length of the plaintext, in bytes.
+    #[must_use]
+    pub fn plaintext_len(&self) -> u64 {
+        self.plaintext_len
     }
 
-    /// Returns true if the plaintext is empty.
-    pub fn is_empty(&self) -> bool {
-        self.plaintext_size == 0
+    /// Returns a reference to the inner reader.
+    pub fn get_ref(&self) -> &R {
+        &self.inner
     }
 
-    /// Returns the inner reader.
+    /// Returns the inner reader. Its position is unspecified.
     pub fn into_inner(self) -> R {
         self.inner
     }
@@ -353,7 +380,7 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
     /// or any error from reading or seeking `inner`.
     pub fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let end = offset.checked_add(buf.len() as u64);
-        if end.is_none_or(|end| end > self.plaintext_size) {
+        if end.is_none_or(|end| end > self.plaintext_len) {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "range extends past the end of the plaintext",
@@ -388,9 +415,19 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
     }
 }
 
+impl<R: fmt::Debug> fmt::Debug for RandomAccessDecryptor<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RandomAccessDecryptor")
+            .field("inner", &self.inner)
+            .field("plaintext_len", &self.plaintext_len)
+            .field("pos", &self.pos)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Read + Seek> Read for RandomAccessDecryptor<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.plaintext_size || buf.is_empty() {
+        if self.pos >= self.plaintext_len || buf.is_empty() {
             return Ok(0);
         }
         let index = self.pos / CHUNK_SIZE as u64;
@@ -407,7 +444,7 @@ impl<R: Read + Seek> Seek for RandomAccessDecryptor<R> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let new = match pos {
             SeekFrom::Start(n) => Some(n),
-            SeekFrom::End(n) => self.plaintext_size.checked_add_signed(n),
+            SeekFrom::End(n) => self.plaintext_len.checked_add_signed(n),
             SeekFrom::Current(n) => self.pos.checked_add_signed(n),
         };
         let Some(new) = new else {

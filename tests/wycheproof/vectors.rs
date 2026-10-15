@@ -1,7 +1,9 @@
 //! Loading of the Wycheproof c2sp.org/chunked-encryption test vectors, as
 //! described in https://github.com/C2SP/wycheproof/blob/main/doc/c2sp_chunked_encryption.md
 //!
-//! The raw mode unit tests use a reduced copy in src/test_vectors.rs.
+//! The files are vendored unmodified; see tests/testdata/README.md for the
+//! upstream commit and license. The raw mode unit tests use a reduced copy in
+//! src/test_vectors.rs.
 
 use std::collections::HashSet;
 use std::io::Read;

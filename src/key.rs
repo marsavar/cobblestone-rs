@@ -5,10 +5,27 @@ use std::fmt;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::Error;
-
 /// The size of a Cobblestone-128 key, in bytes.
 pub const KEY_SIZE: usize = 16;
+
+/// The error returned when a [`Key`] is created from a slice that is not
+/// [`KEY_SIZE`] bytes long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidKeySize {
+    len: usize,
+}
+
+impl fmt::Display for InvalidKeySize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid key size: {} bytes, expected {KEY_SIZE}",
+            self.len
+        )
+    }
+}
+
+impl std::error::Error for InvalidKeySize {}
 
 /// A Cobblestone-128 key.
 ///
@@ -46,6 +63,7 @@ impl Key {
     ///
     /// Panics if the operating system's random number generator fails, which
     /// doesn't happen on supported platforms.
+    #[must_use]
     pub fn generate() -> Key {
         let mut key = Key([0; KEY_SIZE]);
         crate::fill_random(&mut key.0);
@@ -53,11 +71,13 @@ impl Key {
     }
 
     /// Creates a key from its bytes.
+    #[must_use]
     pub fn from_bytes(bytes: &[u8; KEY_SIZE]) -> Key {
         Key(*bytes)
     }
 
     /// Returns the bytes of the key.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; KEY_SIZE] {
         &self.0
     }
@@ -70,18 +90,18 @@ impl From<[u8; KEY_SIZE]> for Key {
 }
 
 impl TryFrom<&[u8]> for Key {
-    type Error = Error;
+    type Error = InvalidKeySize;
 
     /// Creates a key from a slice of bytes.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidKeySize`] if the slice is not [`KEY_SIZE`]
-    /// bytes long.
-    fn try_from(bytes: &[u8]) -> Result<Key, Error> {
+    /// Returns [`InvalidKeySize`] if the slice is not [`KEY_SIZE`] bytes
+    /// long.
+    fn try_from(bytes: &[u8]) -> Result<Key, InvalidKeySize> {
         let bytes = bytes
             .try_into()
-            .map_err(|_| Error::InvalidKeySize(bytes.len()))?;
+            .map_err(|_| InvalidKeySize { len: bytes.len() })?;
         Ok(Key(bytes))
     }
 }
@@ -128,7 +148,9 @@ mod tests {
         let bytes = [7; KEY_SIZE];
         assert_eq!(Key::from(bytes), Key::from_bytes(&bytes));
         assert_eq!(Key::try_from(&bytes[..]), Ok(Key::from(bytes)));
-        assert_eq!(Key::try_from(&[0; 15][..]), Err(Error::InvalidKeySize(15)));
+        let err = Key::try_from(&[0; 15][..]).unwrap_err();
+        assert_eq!(err, InvalidKeySize { len: 15 });
+        assert_eq!(err.to_string(), "invalid key size: 15 bytes, expected 16");
         assert_ne!(Key::from([1; KEY_SIZE]), Key::from(bytes));
     }
 

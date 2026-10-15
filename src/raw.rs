@@ -192,8 +192,9 @@ where
     ///
     /// The caller must pass either exactly [`ENC_CHUNK_SIZE`] bytes, or all
     /// remaining bytes up to the end of the ciphertext. Anything shorter is
-    /// treated as the final chunk; an empty input means the ciphertext was
-    /// truncated at a chunk boundary.
+    /// treated as the final chunk. A final chunk shorter than a tag, including
+    /// an empty one, means the ciphertext was truncated: the spec requires a
+    /// truncation error for it.
     pub(crate) fn open(&mut self, chunk: &mut [u8]) -> Result<usize, Error> {
         if let Some(err) = &self.failed {
             return Err(err.clone());
@@ -208,7 +209,7 @@ where
 
     fn open_inner(&mut self, chunk: &mut [u8]) -> Result<usize, Error> {
         let last = chunk.len() < ENC_CHUNK_SIZE;
-        if chunk.is_empty() {
+        if chunk.len() < TAG_SIZE {
             return Err(Error::Truncated);
         }
         if !last && self.next >= MAX_CHUNKS - 1 {

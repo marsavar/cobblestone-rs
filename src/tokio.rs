@@ -1,22 +1,24 @@
 //! Async streaming APIs for [tokio](https://docs.rs/tokio).
 //!
-//! These behave like their blocking counterparts in the crate root.
+//! These behave like their blocking counterparts in the crate root, and have
+//! the same names. Import the module, or alias the types, to use both:
+//! `use cobblestone::tokio::DecryptReader as AsyncDecryptReader;`.
 //!
 //! # Examples
 //!
 //! ```
-//! use cobblestone::tokio::{AsyncDecryptReader, AsyncEncryptWriter};
+//! use cobblestone::tokio::{DecryptReader, EncryptWriter};
 //! use tokio::io::{AsyncReadExt, AsyncWriteExt};
 //!
 //! # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
 //! let key = cobblestone::Key::generate();
 //!
-//! let mut w = AsyncEncryptWriter::new(&key, b"file.txt", Vec::new());
+//! let mut w = EncryptWriter::new(&key, b"file.txt", Vec::new());
 //! w.write_all(b"hello world").await?;
 //! w.shutdown().await?; // Writes the final chunk.
 //! let ciphertext = w.into_inner();
 //!
-//! let mut r = AsyncDecryptReader::new(&key, b"file.txt", &ciphertext[..]);
+//! let mut r = DecryptReader::new(&key, b"file.txt", &ciphertext[..]);
 //! let mut plaintext = Vec::new();
 //! r.read_to_end(&mut plaintext).await?;
 //! assert_eq!(plaintext, b"hello world");
@@ -24,6 +26,7 @@
 //! # }).unwrap();
 //! ```
 
+use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
@@ -62,14 +65,14 @@ pin_project! {
     /// write the final chunk; it then shuts down the inner writer. Dropping
     /// the writer without shutting it down produces a truncated ciphertext,
     /// which will fail to decrypt.
-    pub struct AsyncEncryptWriter<W> {
+    pub struct EncryptWriter<W> {
         #[pin]
         inner: W,
         state: stream::EncryptWrite,
     }
 }
 
-impl<W: AsyncWrite> AsyncEncryptWriter<W> {
+impl<W: AsyncWrite> EncryptWriter<W> {
     /// Creates a new writer. The header is written to `inner` on the first
     /// write, flush, or shutdown.
     ///
@@ -81,7 +84,7 @@ impl<W: AsyncWrite> AsyncEncryptWriter<W> {
     /// doesn't happen on supported platforms.
     pub fn new(key: &Key, context: &[u8], inner: W) -> Self {
         let (header, enc) = crate::new_header(key, context);
-        AsyncEncryptWriter {
+        EncryptWriter {
             inner,
             state: stream::EncryptWrite::new(header, enc),
         }
@@ -98,7 +101,15 @@ impl<W: AsyncWrite> AsyncEncryptWriter<W> {
     }
 }
 
-impl<W: AsyncWrite> AsyncWrite for AsyncEncryptWriter<W> {
+impl<W: fmt::Debug> fmt::Debug for EncryptWriter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptWriter")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W: AsyncWrite> AsyncWrite for EncryptWriter<W> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -112,7 +123,7 @@ impl<W: AsyncWrite> AsyncWrite for AsyncEncryptWriter<W> {
     /// Writes out any completed chunks and flushes the inner writer.
     ///
     /// Plaintext of an incomplete chunk stays buffered until the chunk is
-    /// complete or the writer is shut down.
+    /// complete or the final chunk is written.
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut this = self.project();
         ready!(
@@ -135,14 +146,14 @@ impl<W: AsyncWrite> AsyncWrite for AsyncEncryptWriter<W> {
 
 pin_project! {
     /// Reads plaintext from an inner reader, and produces the ciphertext.
-    pub struct AsyncEncryptReader<R> {
+    pub struct EncryptReader<R> {
         #[pin]
         inner: R,
         state: stream::EncryptRead,
     }
 }
 
-impl<R: AsyncRead> AsyncEncryptReader<R> {
+impl<R: AsyncRead> EncryptReader<R> {
     /// Creates a new reader that encrypts the plaintext read from `inner`.
     ///
     /// The context may be empty, and must match on decryption.
@@ -153,19 +164,35 @@ impl<R: AsyncRead> AsyncEncryptReader<R> {
     /// doesn't happen on supported platforms.
     pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
         let (header, enc) = crate::new_header(key, context);
-        AsyncEncryptReader {
+        EncryptReader {
             inner,
             state: stream::EncryptRead::new(header, enc),
         }
     }
 
+    /// Returns a reference to the inner reader.
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
     /// Returns the inner reader.
+    ///
+    /// Plaintext already read from `inner` but not yet returned as ciphertext
+    /// is lost.
     pub fn into_inner(self) -> R {
         self.inner
     }
 }
 
-impl<R: AsyncRead> AsyncRead for AsyncEncryptReader<R> {
+impl<R: fmt::Debug> fmt::Debug for EncryptReader<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptReader")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: AsyncRead> AsyncRead for EncryptReader<R> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -182,38 +209,54 @@ impl<R: AsyncRead> AsyncRead for AsyncEncryptReader<R> {
 pin_project! {
     /// Reads ciphertext from an inner reader, and produces the plaintext.
     ///
-    /// The header is read and the key commitment is checked on the first read,
-    /// before any chunk is decrypted. Otherwise, this behaves like
-    /// [`DecryptReader`](crate::DecryptReader): plaintext is only returned
-    /// after it's authenticated, errors are sticky, and the end of the message
-    /// is only reported after the whole ciphertext is authenticated.
-    pub struct AsyncDecryptReader<R> {
+    /// This behaves like [`DecryptReader`](crate::DecryptReader): the header
+    /// is read and the key commitment is checked on the first read, plaintext
+    /// is only returned after it's authenticated, errors are sticky, and the
+    /// end of the message is only reported after the whole ciphertext is
+    /// authenticated.
+    pub struct DecryptReader<R> {
         #[pin]
         inner: R,
         state: stream::DecryptRead,
     }
 }
 
-impl<R: AsyncRead> AsyncDecryptReader<R> {
+impl<R: AsyncRead> DecryptReader<R> {
     /// Creates a new reader that decrypts the ciphertext read from `inner`.
     ///
     /// The header is read and checked on the first read, so all errors,
     /// including [`InvalidCommitment`](crate::Error::InvalidCommitment), are
     /// returned by reads.
     pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
-        AsyncDecryptReader {
+        DecryptReader {
             inner,
             state: stream::DecryptRead::new(key, context),
         }
     }
 
+    /// Returns a reference to the inner reader.
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
     /// Returns the inner reader.
+    ///
+    /// Ciphertext already read from `inner` but not yet returned as plaintext
+    /// is lost.
     pub fn into_inner(self) -> R {
         self.inner
     }
 }
 
-impl<R: AsyncRead> AsyncRead for AsyncDecryptReader<R> {
+impl<R: fmt::Debug> fmt::Debug for DecryptReader<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecryptReader")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: AsyncRead> AsyncRead for DecryptReader<R> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
