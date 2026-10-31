@@ -4,6 +4,23 @@
 //! the same names. Import the module, or alias the types, to use both:
 //! `use cobblestone::tokio::DecryptReader as AsyncDecryptReader;`.
 //!
+//! # Blocking the task
+//!
+//! These types only give the thread back to the runtime when the inner
+//! reader or writer returns `Pending`. Over a source or sink that is always
+//! ready, such as a `&[u8]`, a [`Cursor`](std::io::Cursor) or a `Vec<u8>`, a
+//! whole message is encrypted or decrypted without yielding, and no other
+//! task can run on that thread until it's done.
+//!
+//! Use them with real async I/O, such as [`tokio::fs::File`] or
+//! [`tokio::net::TcpStream`], which returns `Pending` while waiting for data.
+//! For data already in memory, call [`encrypt`](crate::encrypt) or
+//! [`decrypt`](crate::decrypt) inside [`tokio::task::spawn_blocking`] instead.
+//!
+//! [`tokio::fs::File`]: https://docs.rs/tokio/latest/tokio/fs/struct.File.html
+//! [`tokio::net::TcpStream`]: https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html
+//! [`tokio::task::spawn_blocking`]: https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
+//!
 //! # Examples
 //!
 //! ```
