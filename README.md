@@ -12,6 +12,10 @@ It supports authenticated streaming encryption and decryption and
 authenticated random access, and is interoperable with the Go, Python and
 TypeScript implementations.
 
+Cobblestone-256, the compliance-oriented instantiation with AES-256-GCM, is
+available behind the `cobblestone-256` feature, for environments that require
+256-bit keys.
+
 ## Installation
 
 ```sh

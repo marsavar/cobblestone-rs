@@ -5,9 +5,11 @@ mod vectors;
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
+#[cfg(feature = "cobblestone-256")]
+use cobblestone::Key256;
 use cobblestone::{
-    DecryptReader, EncryptReader, EncryptWriter, Error, Key, RandomAccessDecryptor,
-    ciphertext_size, decrypt, encrypt, plaintext_size,
+    CobblestoneKey, DecryptReader, EncryptReader, EncryptWriter, Error, InvalidKeySize, Key,
+    RandomAccessDecryptor, ciphertext_size, decrypt, encrypt, plaintext_size,
 };
 use vectors::Vector;
 
@@ -60,6 +62,7 @@ fn is_header_error(err: &Error) -> bool {
 fn wycheproof() {
     let vectors = vectors::load();
     assert!(!vectors.is_empty());
+    let (mut count_128, mut count_256) = (0, 0);
     for v in &vectors {
         if v.valid {
             let len = v.msg_length.unwrap() as u64;
@@ -67,40 +70,61 @@ fn wycheproof() {
             assert_eq!(ciphertext_size(len), Some(v.ct.len() as u64), "{}", v.name);
         }
 
-        if !v.is_cobblestone_128() && v.has("HeaderFailure") {
-            // Cobblestone-256 is only implemented in raw mode.
-        } else if v.has("InvalidKeySize") {
-            check_invalid_key(v);
-        } else if v.is_cobblestone_128() && v.valid {
-            check_valid(v);
-            check_round_trip(v);
-        } else if v.is_cobblestone_128() {
-            check_invalid(v);
+        // The instantiation is selected by the type of the key.
+        match v.aead.as_str() {
+            "AEAD_AES_128_GCM" => {
+                check_vector(v, Key::try_from(&v.key[..]), cobblestone::KEY_SIZE);
+                count_128 += 1;
+            }
+            "AEAD_AES_256_GCM" => {
+                // Without the feature, Cobblestone-256 is only tested in raw
+                // mode, by the unit tests in src/raw.rs.
+                #[cfg(feature = "cobblestone-256")]
+                check_vector(v, Key256::try_from(&v.key[..]), cobblestone::KEY256_SIZE);
+                count_256 += 1;
+            }
+            aead => panic!("unknown AEAD {aead}"),
         }
+    }
+    // Every vector of both instantiations goes through the public APIs.
+    assert_eq!(count_128 + count_256, vectors.len());
+    assert!(count_128 > 0 && count_256 > 0);
+}
+
+fn check_vector(v: &Vector, key: Result<impl CobblestoneKey, InvalidKeySize>, key_size: usize) {
+    if v.has("InvalidKeySize") {
+        // Keys are validated when a key is created, so no API can be called
+        // with an invalid key.
+        assert_ne!(v.key.len(), key_size);
+        let err = key.err().expect("invalid key size accepted");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid key size: {} bytes, expected {key_size}",
+                v.key.len()
+            ),
+            "{}",
+            v.name
+        );
+        return;
+    }
+    let key = key.unwrap();
+    if v.valid {
+        check_valid(v, &key);
+        check_round_trip(v, &key);
+    } else {
+        check_invalid(v, &key);
     }
 }
 
-fn check_invalid_key(v: &Vector) {
-    // Keys are validated when a Key is created, so no API can be called with
-    // an invalid key.
-    assert_ne!(v.key.len(), cobblestone::KEY_SIZE);
-    let err = Key::try_from(&v.key[..]).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        format!("invalid key size: {} bytes, expected 16", v.key.len()),
-        "{}",
-        v.name
-    );
-}
-
-fn check_valid(v: &Vector) {
-    v.check_message(&decrypt(&v.input_key(), &v.ctx, &v.ct).unwrap());
+fn check_valid(v: &Vector, key: &impl CobblestoneKey) {
+    v.check_message(&decrypt(key, &v.ctx, &v.ct).unwrap());
 
     for piece in [usize::MAX, 1000, 1] {
         if piece == 1 && v.ct.len() > 1 << 20 {
             continue;
         }
-        let mut r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, piece));
+        let mut r = DecryptReader::new(key, &v.ctx, pieces(&v.ct, piece));
         let mut msg = Vec::new();
         r.read_to_end(&mut msg).unwrap();
         v.check_message(&msg);
@@ -108,7 +132,7 @@ fn check_valid(v: &Vector) {
         assert_eq!(r.read(&mut [0; 10]).unwrap(), 0);
     }
 
-    let mut r = RandomAccessDecryptor::new(&v.input_key(), &v.ctx, Cursor::new(&v.ct)).unwrap();
+    let mut r = RandomAccessDecryptor::new(key, &v.ctx, Cursor::new(&v.ct)).unwrap();
     assert_eq!(
         r.plaintext_len(),
         v.msg_length.unwrap() as u64,
@@ -163,51 +187,47 @@ fn check_valid(v: &Vector) {
     }
 
     #[cfg(feature = "tokio")]
-    tokio_tests::check_valid(v);
+    tokio_tests::check_valid(v, key);
 }
 
-fn check_round_trip(v: &Vector) {
-    let msg = decrypt(&v.input_key(), &v.ctx, &v.ct).unwrap();
+fn check_round_trip(v: &Vector, key: &impl CobblestoneKey) {
+    let msg = decrypt(key, &v.ctx, &v.ct).unwrap();
 
-    let ct = encrypt(&v.input_key(), &v.ctx, &msg).unwrap();
+    let ct = encrypt(key, &v.ctx, &msg).unwrap();
     assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
-    v.check_message(&decrypt(&v.input_key(), &v.ctx, &ct).unwrap());
+    v.check_message(&decrypt(key, &v.ctx, &ct).unwrap());
 
-    let mut w = EncryptWriter::new(&v.input_key(), &v.ctx, Vec::new());
+    let mut w = EncryptWriter::new(key, &v.ctx, Vec::new());
     for piece in msg.chunks(1000) {
         w.write_all(piece).unwrap();
     }
     let ct = w.finish().unwrap();
     assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
-    v.check_message(&decrypt(&v.input_key(), &v.ctx, &ct).unwrap());
+    v.check_message(&decrypt(key, &v.ctx, &ct).unwrap());
 
     let mut ct = Vec::new();
-    EncryptReader::new(&v.input_key(), &v.ctx, pieces(&msg, 1000))
+    EncryptReader::new(key, &v.ctx, pieces(&msg, 1000))
         .read_to_end(&mut ct)
         .unwrap();
     assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
-    let mut r = RandomAccessDecryptor::new(&v.input_key(), &v.ctx, Cursor::new(&ct)).unwrap();
+    let mut r = RandomAccessDecryptor::new(key, &v.ctx, Cursor::new(&ct)).unwrap();
     let mut out = Vec::new();
     r.read_to_end(&mut out).unwrap();
     v.check_message(&out);
 
     #[cfg(feature = "tokio")]
-    tokio_tests::check_round_trip(v, &msg);
+    tokio_tests::check_round_trip(v, key, &msg);
 }
 
-fn check_invalid(v: &Vector) {
-    assert!(
-        decrypt(&v.input_key(), &v.ctx, &v.ct).is_err(),
-        "{}",
-        v.name
-    );
+fn check_invalid(v: &Vector, key: &impl CobblestoneKey) {
+    assert!(decrypt(key, &v.ctx, &v.ct).is_err(), "{}", v.name);
 
     if v.has("HeaderFailure") {
         // Rejected before any chunk is decrypted, and without any output.
-        let err = decrypt(&v.input_key(), &v.ctx, &v.ct).unwrap_err();
+        let err = decrypt(key, &v.ctx, &v.ct).unwrap_err();
         assert!(is_header_error(&err), "{}: {err}", v.name);
         // The header is checked on the first read, before any output.
-        let r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, 7));
+        let r = DecryptReader::new(key, &v.ctx, pieces(&v.ct, 7));
         let (data, err) = read_until_error(r);
         let err = err.expect("decryption succeeded");
         assert!(
@@ -216,7 +236,7 @@ fn check_invalid(v: &Vector) {
             v.name
         );
         assert!(data.is_empty(), "{}", v.name);
-        let err = RandomAccessDecryptor::new(&v.input_key(), &v.ctx, Cursor::new(&v.ct))
+        let err = RandomAccessDecryptor::new(key, &v.ctx, Cursor::new(&v.ct))
             .err()
             .unwrap();
         assert!(
@@ -225,7 +245,7 @@ fn check_invalid(v: &Vector) {
             v.name
         );
         #[cfg(feature = "tokio")]
-        tokio_tests::check_header_failure(v);
+        tokio_tests::check_header_failure(v, key);
         return;
     }
 
@@ -233,7 +253,7 @@ fn check_invalid(v: &Vector) {
         if piece == 1 && v.ct.len() > 1 << 20 {
             continue;
         }
-        let r = DecryptReader::new(&v.input_key(), &v.ctx, pieces(&v.ct, piece));
+        let r = DecryptReader::new(key, &v.ctx, pieces(&v.ct, piece));
         let (data, err) = read_until_error(r);
         assert!(err.is_some(), "{}: decryption succeeded", v.name);
         v.check_prefix(&data);
@@ -246,7 +266,7 @@ fn check_invalid(v: &Vector) {
 
     // Authenticating the message length must fail, unless the final chunk is
     // valid.
-    let r = RandomAccessDecryptor::new(&v.input_key(), &v.ctx, Cursor::new(&v.ct));
+    let r = RandomAccessDecryptor::new(key, &v.ctx, Cursor::new(&v.ct));
     if !v.has("ValidFinalChunk") {
         assert!(r.is_err(), "{}: opened for random access", v.name);
     } else {
@@ -260,7 +280,7 @@ fn check_invalid(v: &Vector) {
     }
 
     #[cfg(feature = "tokio")]
-    tokio_tests::check_invalid(v);
+    tokio_tests::check_invalid(v, key);
 }
 
 #[cfg(feature = "tokio")]
@@ -333,11 +353,10 @@ mod tokio_tests {
         }
     }
 
-    pub fn check_valid(v: &Vector) {
+    pub fn check_valid(v: &Vector, key: &impl CobblestoneKey) {
         block_on(async {
             for piece in [usize::MAX, 1000] {
-                let mut r =
-                    AsyncDecryptReader::new(&v.input_key(), &v.ctx, async_pieces(&v.ct, piece));
+                let mut r = AsyncDecryptReader::new(key, &v.ctx, async_pieces(&v.ct, piece));
                 let mut msg = Vec::new();
                 r.read_to_end(&mut msg).await.unwrap();
                 v.check_message(&msg);
@@ -345,30 +364,30 @@ mod tokio_tests {
         })
     }
 
-    pub fn check_round_trip(v: &Vector, msg: &[u8]) {
+    pub fn check_round_trip(v: &Vector, key: &impl CobblestoneKey, msg: &[u8]) {
         block_on(async {
-            let mut w = AsyncEncryptWriter::new(&v.input_key(), &v.ctx, Vec::new());
+            let mut w = AsyncEncryptWriter::new(key, &v.ctx, Vec::new());
             for piece in msg.chunks(1000) {
                 w.write_all(piece).await.unwrap();
             }
             w.shutdown().await.unwrap();
             let ct = w.into_inner();
             assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
-            v.check_message(&decrypt(&v.input_key(), &v.ctx, &ct).unwrap());
+            v.check_message(&decrypt(key, &v.ctx, &ct).unwrap());
 
             let mut ct = Vec::new();
-            AsyncEncryptReader::new(&v.input_key(), &v.ctx, async_pieces(msg, 1000))
+            AsyncEncryptReader::new(key, &v.ctx, async_pieces(msg, 1000))
                 .read_to_end(&mut ct)
                 .await
                 .unwrap();
             assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
-            v.check_message(&decrypt(&v.input_key(), &v.ctx, &ct).unwrap());
+            v.check_message(&decrypt(key, &v.ctx, &ct).unwrap());
         })
     }
 
-    pub fn check_header_failure(v: &Vector) {
+    pub fn check_header_failure(v: &Vector, key: &impl CobblestoneKey) {
         block_on(async {
-            let r = AsyncDecryptReader::new(&v.input_key(), &v.ctx, async_pieces(&v.ct, 7));
+            let r = AsyncDecryptReader::new(key, &v.ctx, async_pieces(&v.ct, 7));
             let (data, err) = read_until_error(r).await;
             let err = err.expect("decryption succeeded");
             assert!(
@@ -380,10 +399,10 @@ mod tokio_tests {
         })
     }
 
-    pub fn check_invalid(v: &Vector) {
+    pub fn check_invalid(v: &Vector, key: &impl CobblestoneKey) {
         block_on(async {
             for piece in [usize::MAX, 1000] {
-                let r = AsyncDecryptReader::new(&v.input_key(), &v.ctx, async_pieces(&v.ct, piece));
+                let r = AsyncDecryptReader::new(key, &v.ctx, async_pieces(&v.ct, piece));
                 let (data, err) = read_until_error(r).await;
                 assert!(err.is_some(), "{}: decryption succeeded", v.name);
                 v.check_prefix(&data);
@@ -665,4 +684,22 @@ fn final_chunk_shorter_than_a_tag_is_truncation() {
         // The full chunk before it was valid, and may be released.
         assert!(data.len() <= 16384);
     }
+}
+
+#[cfg(feature = "cobblestone-256")]
+#[test]
+fn instantiations_are_not_interchangeable() {
+    // The header doesn't record the instantiation, so a ciphertext of one
+    // must fail the commitment check under the other, even with related key
+    // bytes.
+    let key = Key::generate();
+    let mut bytes = [0; 32];
+    bytes[..16].copy_from_slice(key.as_bytes());
+    let key256 = Key256::from(bytes);
+
+    let ct = encrypt(&key, b"", b"hello").unwrap();
+    assert_eq!(decrypt(&key256, b"", &ct), Err(Error::InvalidCommitment));
+    let ct = encrypt(&key256, b"", b"hello").unwrap();
+    assert_eq!(decrypt(&key, b"", &ct), Err(Error::InvalidCommitment));
+    assert_eq!(decrypt(&key256, b"", &ct).unwrap(), b"hello");
 }

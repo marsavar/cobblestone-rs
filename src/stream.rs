@@ -8,10 +8,9 @@
 use std::io;
 use std::task::{Poll, ready};
 
-use aes_gcm::Aes128Gcm;
-
-use crate::raw::{CHUNK_SIZE, Decryptor, ENC_CHUNK_SIZE, Encryptor, TAG_SIZE};
-use crate::{Error, HEADER_SIZE, Key};
+use crate::key::sealed::{Variant, VariantRef};
+use crate::raw::{AesGcm, CHUNK_SIZE, Decryptor, ENC_CHUNK_SIZE, Encryptor, TAG_SIZE};
+use crate::{Error, HEADER_SIZE};
 
 /// Reads into `buf[*filled..]` until it's full or the source reaches EOF.
 /// Returns whether EOF was reached.
@@ -60,7 +59,7 @@ fn poll_flush_buf(
 /// Pull-based encryption: plaintext is read from a source and ciphertext is
 /// produced.
 pub(crate) struct EncryptRead {
-    enc: Encryptor<Aes128Gcm>,
+    enc: Encryptor<AesGcm>,
     buf: Box<[u8]>,
     /// While `filling`, the length of plaintext accumulated in `buf`.
     /// Otherwise, the end of the output pending in `buf`.
@@ -72,7 +71,7 @@ pub(crate) struct EncryptRead {
 }
 
 impl EncryptRead {
-    pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<Aes128Gcm>) -> Self {
+    pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<AesGcm>) -> Self {
         let mut buf = vec![0; ENC_CHUNK_SIZE].into_boxed_slice();
         buf[..HEADER_SIZE].copy_from_slice(&header);
         EncryptRead {
@@ -122,7 +121,7 @@ impl EncryptRead {
 /// Push-based encryption: plaintext is written and ciphertext is written to a
 /// sink.
 pub(crate) struct EncryptWrite {
-    enc: Encryptor<Aes128Gcm>,
+    enc: Encryptor<AesGcm>,
     buf: Box<[u8]>,
     /// The length of plaintext accumulated in `buf`, when not flushing.
     acc: usize,
@@ -135,7 +134,7 @@ pub(crate) struct EncryptWrite {
 }
 
 impl EncryptWrite {
-    pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<Aes128Gcm>) -> Self {
+    pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<AesGcm>) -> Self {
         let mut buf = vec![0; ENC_CHUNK_SIZE].into_boxed_slice();
         buf[..HEADER_SIZE].copy_from_slice(&header);
         EncryptWrite {
@@ -233,10 +232,10 @@ impl EncryptWrite {
 enum DecryptPhase {
     /// The header hasn't been fully read yet.
     Header {
-        key: Key,
+        key: Variant,
         context: Vec<u8>,
     },
-    Body(Decryptor<Aes128Gcm>),
+    Body(Decryptor<AesGcm>),
 }
 
 /// Pull-based decryption: ciphertext is read from a source and authenticated
@@ -253,10 +252,10 @@ pub(crate) struct DecryptRead {
 }
 
 impl DecryptRead {
-    pub(crate) fn new(key: &Key, context: &[u8]) -> Self {
+    pub(crate) fn new(key: VariantRef<'_>, context: &[u8]) -> Self {
         DecryptRead {
             phase: DecryptPhase::Header {
-                key: key.clone(),
+                key: key.into_owned(),
                 context: context.to_vec(),
             },
             buf: vec![0; ENC_CHUNK_SIZE].into_boxed_slice(),
@@ -287,7 +286,7 @@ impl DecryptRead {
             Err(Error::Truncated)
         } else {
             let header = self.buf[..HEADER_SIZE].try_into().unwrap();
-            crate::open_header(key, context, header)
+            crate::open_header(key.as_ref(), context, header)
         };
         self.filled = 0;
         match result {
