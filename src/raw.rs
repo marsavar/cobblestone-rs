@@ -5,9 +5,13 @@
 //! applications), but it's kept separate so that it can be tested against the
 //! raw mode test vectors, and so that it could become a hazmat API later.
 
+use aes_gcm::Aes128Gcm;
+#[cfg(feature = "cobblestone-256")]
+use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{
-    AeadCore, AeadInOut, Nonce, Tag,
+    AeadCore, AeadInOut, Nonce, Tag, TagPosition,
     consts::{U12, U16},
+    inout::InOutBuf,
 };
 
 use crate::Error;
@@ -54,6 +58,52 @@ pub(crate) fn ciphertext_size(plaintext_size: u64) -> Option<u64> {
         return None;
     }
     Some(plaintext_size + chunks * TAG_SIZE as u64)
+}
+
+/// The AEAD of either instantiation, so that the streaming types don't need a
+/// type parameter for it.
+// The size difference is small next to the 16 KiB chunk buffer every stream
+// holds, so boxing the larger variant isn't worth the indirection.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum AesGcm {
+    Aes128(Aes128Gcm),
+    #[cfg(feature = "cobblestone-256")]
+    Aes256(Aes256Gcm),
+}
+
+impl AeadCore for AesGcm {
+    type NonceSize = U12;
+    type TagSize = U16;
+    const TAG_POSITION: TagPosition = TagPosition::Postfix;
+}
+
+impl AeadInOut for AesGcm {
+    fn encrypt_inout_detached(
+        &self,
+        nonce: &Nonce<Self>,
+        associated_data: &[u8],
+        buffer: InOutBuf<'_, '_, u8>,
+    ) -> aes_gcm::aead::Result<Tag<Self>> {
+        match self {
+            AesGcm::Aes128(a) => a.encrypt_inout_detached(nonce, associated_data, buffer),
+            #[cfg(feature = "cobblestone-256")]
+            AesGcm::Aes256(a) => a.encrypt_inout_detached(nonce, associated_data, buffer),
+        }
+    }
+
+    fn decrypt_inout_detached(
+        &self,
+        nonce: &Nonce<Self>,
+        associated_data: &[u8],
+        buffer: InOutBuf<'_, '_, u8>,
+        tag: &Tag<Self>,
+    ) -> aes_gcm::aead::Result<()> {
+        match self {
+            AesGcm::Aes128(a) => a.decrypt_inout_detached(nonce, associated_data, buffer, tag),
+            #[cfg(feature = "cobblestone-256")]
+            AesGcm::Aes256(a) => a.decrypt_inout_detached(nonce, associated_data, buffer, tag),
+        }
+    }
 }
 
 /// An AEAD and base nonce, which can encrypt and decrypt chunks at any index.
@@ -225,7 +275,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes_gcm::{Aes128Gcm, KeyInit};
+    use aes_gcm::{Aes256Gcm, KeyInit};
 
     #[test]
     fn sizes() {
@@ -412,7 +462,7 @@ mod tests {
                     ChunkCipher::new(Aes128Gcm::new_from_slice(key).unwrap(), nonce)
                 }),
                 "AEAD_AES_256_GCM" => check_vector(&v, || {
-                    ChunkCipher::new(aes_gcm::Aes256Gcm::new_from_slice(key).unwrap(), nonce)
+                    ChunkCipher::new(Aes256Gcm::new_from_slice(key).unwrap(), nonce)
                 }),
                 aead => panic!("unknown AEAD {aead}"),
             }

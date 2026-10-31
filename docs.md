@@ -18,6 +18,22 @@ Python ([pyca/cryptography](https://cryptography.io/en/latest/cobblestone/)) and
 TypeScript ([cobblestone.ts](https://github.com/FiloSottile/cobblestone.ts))
 implementations, and passes the Wycheproof test vectors.
 
+### Cobblestone-256
+
+Cobblestone-256 is the same scheme with AES-256-GCM and 32-byte keys. The spec
+describes it as compliance-oriented and recommends Cobblestone-128 absent other
+requirements, so it is behind a feature, for environments that require 256-bit
+keys:
+
+```sh
+cargo add cobblestone --features cobblestone-256
+```
+
+Use a `Key256` instead of a `Key`: every API accepts either, and the key type
+selects the instantiation. The header doesn't record which one was used, so a
+message must be decrypted with the same type of key. pyca/cryptography also
+implements Cobblestone-256.
+
 ## Usage
 
 In memory:
@@ -218,7 +234,7 @@ time another task was kept waiting:
 
 - The crypto comes from RustCrypto (`aes-gcm`, `hmac`, `sha2`). HKDF-Expand is
   written by hand on top of `hmac`, because the `hkdf` crate rejects PRKs
-  shorter than the hash output, and Cobblestone uses the 16-byte key directly as
+  shorter than the hash output, and Cobblestone uses the input key directly as
   the PRK.
 - The blocking and async types share one I/O-free state machine
   (`src/stream.rs`), so truncation, chunk counting and sticky errors are
@@ -227,7 +243,6 @@ time another task was kept waiting:
   in `src/raw.rs` but not exposed. The spec says libraries SHOULD NOT expose it
   to applications. It is tested against the raw-mode vectors for both
   AES-128-GCM and AES-256-GCM.
-- Cobblestone-256 is not exposed.
 
 ## Testing
 
@@ -243,6 +258,7 @@ This runs:
   through every API: one-shot, streaming with whole input, 1000-byte reads and
   1-byte reads, random access, tokio, and re-encryption. The tests check prefix and sticky-error behavior on invalid
   vectors, as the cobblestone.ts suite does. Raw mode is tested for both
-  instantiations.
+  instantiations. The Cobblestone-256 vectors only go through the public APIs
+  with the `cobblestone-256` feature, which `--all-features` enables.
 - **Doctests**, including the Rust examples in this file and the README. They run with
   `--all-features`, since one of them needs `tokio`.

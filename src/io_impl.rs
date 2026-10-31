@@ -4,11 +4,9 @@ use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::task::Poll;
 
-use aes_gcm::Aes128Gcm;
-
-use crate::raw::{self, CHUNK_SIZE, ChunkCipher, ENC_CHUNK_SIZE, TAG_SIZE};
+use crate::raw::{self, AesGcm, CHUNK_SIZE, ChunkCipher, ENC_CHUNK_SIZE, TAG_SIZE};
 use crate::stream;
-use crate::{Error, HEADER_SIZE, Key};
+use crate::{CobblestoneKey, Error, HEADER_SIZE};
 
 fn unwrap_ready<T>(p: Poll<T>) -> T {
     match p {
@@ -55,8 +53,8 @@ impl<W: Write> EncryptWriter<W> {
     ///
     /// Panics if the operating system's random number generator fails, which
     /// doesn't happen on supported platforms.
-    pub fn new(key: &Key, context: &[u8], inner: W) -> Self {
-        let (header, enc) = crate::new_header(key, context);
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], inner: W) -> Self {
+        let (header, enc) = crate::new_header(key.variant(), context);
         EncryptWriter {
             inner,
             state: stream::EncryptWrite::new(header, enc),
@@ -140,8 +138,8 @@ impl<R: Read> EncryptReader<R> {
     ///
     /// Panics if the operating system's random number generator fails, which
     /// doesn't happen on supported platforms.
-    pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
-        let (header, enc) = crate::new_header(key, context);
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], inner: R) -> Self {
+        let (header, enc) = crate::new_header(key.variant(), context);
         EncryptReader {
             inner,
             state: stream::EncryptRead::new(header, enc),
@@ -221,10 +219,10 @@ impl<R: Read> DecryptReader<R> {
     ///
     /// The header is read and checked on the first read, so all errors,
     /// including [`Error::InvalidCommitment`], are returned by reads.
-    pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], inner: R) -> Self {
         DecryptReader {
             inner,
-            state: stream::DecryptRead::new(key, context),
+            state: stream::DecryptRead::new(key.variant(), context),
         }
     }
 
@@ -289,7 +287,7 @@ impl<R: Read> Read for DecryptReader<R> {
 /// ```
 pub struct RandomAccessDecryptor<R> {
     inner: R,
-    cipher: ChunkCipher<Aes128Gcm>,
+    cipher: ChunkCipher<AesGcm>,
     /// The size of the raw ciphertext, after the header.
     body_size: u64,
     plaintext_len: u64,
@@ -320,7 +318,7 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
     ///   for example because the ciphertext was truncated or extended.
     ///
     /// or any error from reading or seeking `inner`.
-    pub fn new(key: &Key, context: &[u8], mut inner: R) -> io::Result<Self> {
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], mut inner: R) -> io::Result<Self> {
         let size = inner.seek(SeekFrom::End(0))?;
         if size < HEADER_SIZE as u64 {
             return Err(Error::Truncated.into());
@@ -328,7 +326,7 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
         let mut header = [0; HEADER_SIZE];
         inner.seek(SeekFrom::Start(0))?;
         inner.read_exact(&mut header)?;
-        let cipher = crate::open_header(key, context, &header)?;
+        let cipher = crate::open_header(key.variant(), context, &header)?;
         let body_size = size - HEADER_SIZE as u64;
         let chunks = raw::encrypted_chunk_count(body_size)?;
         let mut d = RandomAccessDecryptor {

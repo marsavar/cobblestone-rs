@@ -34,7 +34,7 @@ use std::task::{Context, Poll, ready};
 use ::tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use pin_project_lite::pin_project;
 
-use crate::Key;
+use crate::CobblestoneKey;
 use crate::stream;
 
 fn poll_read_slice<R: AsyncRead>(
@@ -82,8 +82,8 @@ impl<W: AsyncWrite> EncryptWriter<W> {
     ///
     /// Panics if the operating system's random number generator fails, which
     /// doesn't happen on supported platforms.
-    pub fn new(key: &Key, context: &[u8], inner: W) -> Self {
-        let (header, enc) = crate::new_header(key, context);
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], inner: W) -> Self {
+        let (header, enc) = crate::new_header(key.variant(), context);
         EncryptWriter {
             inner,
             state: stream::EncryptWrite::new(header, enc),
@@ -162,8 +162,8 @@ impl<R: AsyncRead> EncryptReader<R> {
     ///
     /// Panics if the operating system's random number generator fails, which
     /// doesn't happen on supported platforms.
-    pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
-        let (header, enc) = crate::new_header(key, context);
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], inner: R) -> Self {
+        let (header, enc) = crate::new_header(key.variant(), context);
         EncryptReader {
             inner,
             state: stream::EncryptRead::new(header, enc),
@@ -227,10 +227,10 @@ impl<R: AsyncRead> DecryptReader<R> {
     /// The header is read and checked on the first read, so all errors,
     /// including [`InvalidCommitment`](crate::Error::InvalidCommitment), are
     /// returned by reads.
-    pub fn new(key: &Key, context: &[u8], inner: R) -> Self {
+    pub fn new(key: &impl CobblestoneKey, context: &[u8], inner: R) -> Self {
         DecryptReader {
             inner,
-            state: stream::DecryptRead::new(key, context),
+            state: stream::DecryptRead::new(key.variant(), context),
         }
     }
 

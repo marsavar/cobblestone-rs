@@ -23,6 +23,8 @@ zeroize = "1"
 
 [features]
 tokio = ["dep:tokio", "dep:pin-project-lite"]
+# Cobblestone-256, the compliance-oriented instantiation with AES-256-GCM.
+cobblestone-256 = []
 
 [package.metadata.docs.rs]
 all-features = true

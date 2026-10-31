@@ -62,15 +62,6 @@ pub struct Vector {
 }
 
 impl Vector {
-    pub fn is_cobblestone_128(&self) -> bool {
-        self.aead == "AEAD_AES_128_GCM"
-    }
-
-    /// The input key, which must be valid.
-    pub fn input_key(&self) -> cobblestone::Key {
-        cobblestone::Key::try_from(&self.key[..]).unwrap()
-    }
-
     pub fn has(&self, flag: &str) -> bool {
         self.flags.contains(flag)
     }
