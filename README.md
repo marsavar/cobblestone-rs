@@ -76,9 +76,19 @@ handling, and choosing between the blocking and async APIs, see the
 
 This crate was largely written by Claude, Anthropic's AI model, under my
 direction and review. It passes the full Wycheproof test suite for the
-scheme, but it has not been independently audited. Please report problems
-in the [issue tracker](https://github.com/marsavar/cobblestone-rs/issues),
-and I will do my best to address them.
+scheme. 
+
+The chunking layer (chunk sizes, nonces, and the order and finality
+of chunks) also has [Kani](https://github.com/model-checking/kani) proofs
+that check it over every input. The proofs don't cover AES-GCM, which comes
+from RustCrypto's `aes-gcm` crate. They also don't cover this crate's key derivation,
+which the Wycheproof vectors check byte for byte, or the streaming APIs,
+which are tested but not formally verified. 
+
+This crate itself has not been
+independently audited. Please report problems in the
+[issue tracker](https://github.com/marsavar/cobblestone-rs/issues), and I
+will do my best to address them.
 
 ## Acknowledgements
 

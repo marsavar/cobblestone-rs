@@ -262,3 +262,28 @@ This runs:
   with the `cobblestone-256` feature, which `--all-features` enables.
 - **Doctests**, including the Rust examples in this file and the README. They run with
   `--all-features`, since one of them needs `tokio`.
+
+## Proofs
+
+The chunking layer in `src/raw.rs` has [Kani](https://github.com/model-checking/kani)
+proofs, which check it over every input rather than over samples: chunk and
+ciphertext sizes, nonce uniqueness, and the order and finality of chunks in
+the encryptor and decryptor. They use a stand-in for AES-GCM, which is far
+too slow for Kani, so they check the chunking logic and not the cipher. CI
+runs them on every pull request.
+
+To run them locally, install Kani once (CI uses 0.68.0):
+
+```sh
+cargo install --locked kani-verifier --version 0.68.0
+cargo kani setup
+```
+
+Then run the proofs:
+
+```sh
+cargo kani --lib
+```
+
+To run them in parallel, add `--jobs --output-format terse`. 
+To run a single proof, add `--harness <name>`, for example `--harness nonces_are_unique`.
