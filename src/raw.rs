@@ -470,3 +470,234 @@ mod tests {
         assert!(count > 0);
     }
 }
+
+/// Proofs for Kani.
+///
+/// The chunk layer is generic over the AEAD, so the proofs use [`NonceAead`]
+/// in place of AES-GCM, which is far too slow for Kani.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    use aes_gcm::aead;
+
+    struct NonceAead;
+
+    fn tag_for(nonce: &Nonce<NonceAead>) -> Tag<NonceAead> {
+        let mut tag = Tag::<NonceAead>::default();
+        tag[..nonce.len()].copy_from_slice(nonce);
+        tag
+    }
+
+    impl AeadCore for NonceAead {
+        type NonceSize = U12;
+        type TagSize = U16;
+        const TAG_POSITION: TagPosition = TagPosition::Postfix;
+    }
+
+    impl AeadInOut for NonceAead {
+        fn encrypt_inout_detached(
+            &self,
+            nonce: &Nonce<Self>,
+            _associated_data: &[u8],
+            _buffer: InOutBuf<'_, '_, u8>,
+        ) -> aead::Result<Tag<Self>> {
+            Ok(tag_for(nonce))
+        }
+
+        fn decrypt_inout_detached(
+            &self,
+            nonce: &Nonce<Self>,
+            _associated_data: &[u8],
+            _buffer: InOutBuf<'_, '_, u8>,
+            tag: &Tag<Self>,
+        ) -> aead::Result<()> {
+            if *tag == tag_for(nonce) {
+                Ok(())
+            } else {
+                Err(aead::Error)
+            }
+        }
+    }
+
+    fn any_cipher() -> ChunkCipher<NonceAead> {
+        ChunkCipher::new(NonceAead, &kani::any())
+    }
+
+    /// Every plaintext size up to the limit has a ciphertext size, which maps
+    /// back to it, and the computations never overflow.
+    #[kani::proof]
+    fn sizes_round_trip() {
+        let n: u64 = kani::any();
+        match ciphertext_size(n) {
+            Some(c) => assert_eq!(plaintext_size(c), Ok(n)),
+            None => {
+                assert!(n / CHUNK_SIZE as u64 + 1 > MAX_CHUNKS);
+            }
+        }
+    }
+
+    /// Every size accepted as a ciphertext size has an in-range chunk count,
+    /// and is the ciphertext size of its plaintext size.
+    #[kani::proof]
+    fn accepted_sizes_are_exact() {
+        let s: u64 = kani::any();
+        if let Ok(chunks) = encrypted_chunk_count(s) {
+            assert!((1..=MAX_CHUNKS).contains(&chunks));
+            let p = plaintext_size(s).unwrap();
+            assert_eq!(ciphertext_size(p), Some(s));
+        }
+    }
+
+    /// Chunks of a message never share a nonce.
+    #[kani::proof]
+    fn nonces_are_unique() {
+        let cipher = any_cipher();
+        let (i, j): (u64, u64) = (kani::any(), kani::any());
+        kani::assume(i < MAX_CHUNKS && j < MAX_CHUNKS && i != j);
+        assert_ne!(cipher.nonce(i), cipher.nonce(j));
+    }
+
+    /// Sealing from any state an encryptor can be in uses the next index,
+    /// and keeps the invariant that an unfinished encryptor's next index is
+    /// in range. So no sequence of calls reuses a nonce or panics.
+    #[kani::proof]
+    fn encryptor_invariant() {
+        let mut enc = Encryptor::new(any_cipher());
+        enc.next = kani::any();
+        kani::assume(enc.next < MAX_CHUNKS);
+        let start = enc.next;
+
+        let last: bool = kani::any();
+        let len = if last {
+            kani::any_where(|&len: &usize| len < CHUNK_SIZE)
+        } else {
+            CHUNK_SIZE
+        };
+        let mut buf = [0; CHUNK_SIZE];
+        match enc.seal(&mut buf[..len], last) {
+            Ok(tag) => {
+                assert_eq!(
+                    tag,
+                    <[u8; TAG_SIZE]>::from(tag_for(&enc.cipher.nonce(start)))
+                );
+                assert_eq!(enc.next, start + 1);
+                assert_eq!(enc.finished, last);
+                assert!(enc.finished || enc.next < MAX_CHUNKS);
+            }
+            Err(err) => {
+                assert_eq!(err, Error::MessageTooLarge);
+                assert!(!last && start == MAX_CHUNKS - 1);
+                assert_eq!(enc.next, start);
+                assert!(!enc.finished);
+            }
+        }
+    }
+
+    // The decryptor proofs below together cover a chunk of any length and
+    // tag, opened from any state a decryptor can open from. They are split
+    // by case because one proof over a symbolic tag doesn't finish.
+
+    /// Returns a decryptor at any in-range index, and that index.
+    fn any_decryptor() -> (Decryptor<NonceAead>, u64) {
+        let mut dec = Decryptor::new(any_cipher());
+        dec.next = kani::any();
+        kani::assume(dec.next < MAX_CHUNKS);
+        let start = dec.next;
+        (dec, start)
+    }
+
+    /// Returns a buffer of `len` bytes ending in `tag`. A buffer of exactly
+    /// the chunk length is much faster for Kani than a fixed array sliced at
+    /// a symbolic length.
+    fn chunk_with_tag(len: usize, tag: &[u8; TAG_SIZE]) -> Vec<u8> {
+        let mut buf = vec![0; len - TAG_SIZE];
+        buf.extend_from_slice(tag);
+        buf
+    }
+
+    /// Checks that a failed open left the decryptor where it was, and made
+    /// the error sticky.
+    fn check_failed(mut dec: Decryptor<NonceAead>, start: u64, err: Error) {
+        assert_eq!(dec.next, start);
+        assert!(!dec.is_done());
+        assert_eq!(dec.failed(), Some(&err));
+        assert_eq!(dec.open(&mut [0; TAG_SIZE]), Err(err));
+    }
+
+    /// A chunk shorter than a tag is a truncation.
+    #[kani::proof]
+    fn decryptor_rejects_short_chunks() {
+        let (mut dec, start) = any_decryptor();
+        let len = kani::any_where(|&len: &usize| len < TAG_SIZE);
+        let mut buf = [0; TAG_SIZE];
+        let result = dec.open(&mut buf[..len]);
+        assert_eq!(result, Err(Error::Truncated));
+        check_failed(dec, start, Error::Truncated);
+    }
+
+    /// A chunk that authenticates at the next index is accepted, and is
+    /// final exactly when it is short, except that a full chunk at the last
+    /// index is rejected: a final chunk would have no index left. Accepting
+    /// keeps the invariant that an unfinished decryptor's next index is in
+    /// range.
+    #[kani::proof]
+    fn decryptor_accepts_valid_chunks() {
+        let (mut dec, start) = any_decryptor();
+        let len = kani::any_where(|&len: &usize| (TAG_SIZE..=ENC_CHUNK_SIZE).contains(&len));
+        let tag = tag_for(&dec.cipher.nonce(start)).into();
+        let mut buf = chunk_with_tag(len, &tag);
+        match dec.open(&mut buf) {
+            Ok(n) => {
+                assert_eq!(n, len - TAG_SIZE);
+                assert_eq!(dec.next, start + 1);
+                assert_eq!(dec.is_done(), len < ENC_CHUNK_SIZE);
+                assert!(dec.is_done() || dec.next < MAX_CHUNKS);
+            }
+            Err(err) => {
+                assert_eq!(err, Error::MessageTooLarge);
+                assert!(len == ENC_CHUNK_SIZE && start == MAX_CHUNKS - 1);
+                check_failed(dec, start, err);
+            }
+        }
+    }
+
+    /// A chunk that doesn't authenticate at the next index is rejected.
+    #[kani::proof]
+    fn decryptor_rejects_invalid_chunks() {
+        let (mut dec, start) = any_decryptor();
+        let len = kani::any_where(|&len: &usize| (TAG_SIZE..=ENC_CHUNK_SIZE).contains(&len));
+        let tag: [u8; TAG_SIZE] = kani::any();
+        kani::assume(tag != <[u8; TAG_SIZE]>::from(tag_for(&dec.cipher.nonce(start))));
+        let mut buf = chunk_with_tag(len, &tag);
+        let Err(err) = dec.open(&mut buf) else {
+            panic!("an invalid chunk was accepted");
+        };
+        assert!(err == Error::DecryptionFailed { chunk: start } || err == Error::MessageTooLarge);
+        check_failed(dec, start, err);
+    }
+
+    /// A chunk sealed by an encryptor opens in a decryptor at the same
+    /// index, and both agree on whether it was the final chunk.
+    #[kani::proof]
+    fn seal_then_open() {
+        let start = kani::any_where(|&i: &u64| i < MAX_CHUNKS);
+        let mut enc = Encryptor::new(any_cipher());
+        let mut dec = Decryptor::new(ChunkCipher::new(NonceAead, &enc.cipher.base_nonce));
+        enc.next = start;
+        dec.next = start;
+
+        let last: bool = kani::any();
+        let len = if last {
+            kani::any_where(|&len: &usize| len < CHUNK_SIZE)
+        } else {
+            CHUNK_SIZE
+        };
+        let mut buf = vec![0; len];
+        let Ok(tag) = enc.seal(&mut buf, last) else {
+            return;
+        };
+        buf.extend_from_slice(&tag);
+        assert_eq!(dec.open(&mut buf), Ok(len));
+        assert_eq!(dec.is_done(), last);
+    }
+}
