@@ -41,7 +41,9 @@ fn read_until_error(mut r: impl Read) -> (Vec<u8>, Option<io::Error>) {
             Ok(0) => return (data, None),
             Ok(n) => data.extend_from_slice(&buf[..n]),
             Err(err) => {
-                assert!(r.read(&mut buf).is_err(), "stream did not keep failing");
+                for _ in 0..3 {
+                    assert!(r.read(&mut buf).is_err(), "stream did not keep failing");
+                }
                 return (data, Some(err));
             }
         }
@@ -277,6 +279,23 @@ fn check_invalid(v: &Vector, key: &impl CobblestoneKey) {
         let mut prefix = vec![0; v.prefix_length()];
         r.read_exact(&mut prefix).unwrap();
         v.check_prefix(&prefix);
+
+        // The same, through positional reads. The prefix is whole chunks, so
+        // the first invalid chunk starts right after it.
+        let bad_chunk = Error::DecryptionFailed {
+            chunk: (v.prefix_length() / 16384) as u64,
+        };
+        let len = r.plaintext_len() as usize;
+        let err = r.read_exact_at(&mut vec![0; len], 0).unwrap_err();
+        assert_eq!(cobblestone_error(&err), &bad_chunk, "{}", v.name);
+        let mut prefix = vec![0; v.prefix_length()];
+        r.read_exact_at(&mut prefix, 0).unwrap();
+        v.check_prefix(&prefix);
+        // The first byte past the valid prefix is in an invalid chunk.
+        let err = r
+            .read_exact_at(&mut [0], v.prefix_length() as u64)
+            .unwrap_err();
+        assert_eq!(cobblestone_error(&err), &bad_chunk, "{}", v.name);
     }
 
     #[cfg(feature = "tokio")]
@@ -343,10 +362,12 @@ mod tokio_tests {
                 Ok(0) => return (data, None),
                 Ok(n) => data.extend_from_slice(&buf[..n]),
                 Err(err) => {
-                    assert!(
-                        r.read(&mut buf).await.is_err(),
-                        "stream did not keep failing"
-                    );
+                    for _ in 0..3 {
+                        assert!(
+                            r.read(&mut buf).await.is_err(),
+                            "stream did not keep failing"
+                        );
+                    }
                     return (data, Some(err));
                 }
             }
@@ -355,7 +376,10 @@ mod tokio_tests {
 
     pub fn check_valid(v: &Vector, key: &impl CobblestoneKey) {
         block_on(async {
-            for piece in [usize::MAX, 1000] {
+            for piece in [usize::MAX, 1000, 1] {
+                if piece == 1 && v.ct.len() > 1 << 20 {
+                    continue;
+                }
                 let mut r = AsyncDecryptReader::new(key, &v.ctx, async_pieces(&v.ct, piece));
                 let mut msg = Vec::new();
                 r.read_to_end(&mut msg).await.unwrap();
@@ -401,11 +425,19 @@ mod tokio_tests {
 
     pub fn check_invalid(v: &Vector, key: &impl CobblestoneKey) {
         block_on(async {
-            for piece in [usize::MAX, 1000] {
+            for piece in [usize::MAX, 1000, 1] {
+                if piece == 1 && v.ct.len() > 1 << 20 {
+                    continue;
+                }
                 let r = AsyncDecryptReader::new(key, &v.ctx, async_pieces(&v.ct, piece));
                 let (data, err) = read_until_error(r).await;
                 assert!(err.is_some(), "{}: decryption succeeded", v.name);
                 v.check_prefix(&data);
+                if piece == 1 {
+                    // With a byte-by-byte source, every valid chunk is
+                    // delivered before the error.
+                    assert_eq!(data.len(), v.prefix_length(), "{}", v.name);
+                }
             }
         })
     }
