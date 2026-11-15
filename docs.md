@@ -114,7 +114,7 @@ async fn main() -> std::io::Result<()> {
     let mut w = EncryptWriter::new(&key, b"upload", Vec::new());
     w.write_all(b"hello world").await?;
     w.shutdown().await?; // Required: writes the final chunk and shuts down the inner writer.
-    let ciphertext = w.into_inner();
+    let ciphertext = w.into_inner()?; // Fails if the writer was not shut down.
 
     let mut r = DecryptReader::new(&key, b"upload", &ciphertext[..]);
     let mut plaintext = Vec::new();

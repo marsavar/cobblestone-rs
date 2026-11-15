@@ -395,7 +395,7 @@ mod tokio_tests {
                 w.write_all(piece).await.unwrap();
             }
             w.shutdown().await.unwrap();
-            let ct = w.into_inner();
+            let ct = w.into_inner().unwrap();
             assert_eq!(ct.len(), v.ct.len(), "{}", v.name);
             v.check_message(&decrypt(key, &v.ctx, &ct).unwrap());
 
@@ -561,10 +561,45 @@ fn async_writer_with_pending_sink() {
             w.flush().await.unwrap();
             w.shutdown().await.unwrap();
             assert!(w.write(b"more").await.is_err());
-            w.into_inner()
+            w.into_inner().unwrap()
         });
     assert!(sink.shut_down);
     assert_eq!(decrypt(&key, b"x", &sink.out).unwrap(), msg);
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn async_writer_into_inner_requires_shutdown() {
+    use cobblestone::tokio::EncryptWriter as AsyncEncryptWriter;
+    use tokio::io::AsyncWriteExt;
+
+    let key = Key::generate();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            // Without shutdown, the ciphertext is truncated, whether or not
+            // anything was written or flushed.
+            let w = AsyncEncryptWriter::new(&key, b"", Vec::new());
+            assert!(w.into_inner().is_err());
+
+            let mut w = AsyncEncryptWriter::new(&key, b"", Vec::new());
+            w.write_all(&message(40_000)).await.unwrap();
+            w.flush().await.unwrap();
+            let err = w.into_inner().unwrap_err();
+            assert_eq!(err.to_string(), "the encryption writer was not shut down");
+
+            // The error hands the writer back, and it can still be finished.
+            let mut w = err.into_inner();
+            w.shutdown().await.unwrap();
+            let ct = w.into_inner().unwrap();
+            assert_eq!(decrypt(&key, b"", &ct).unwrap(), message(40_000));
+
+            // The error converts into an io::Error, for use with `?`.
+            let w = AsyncEncryptWriter::new(&key, b"", Vec::new());
+            let err = io::Error::from(w.into_inner().unwrap_err());
+            assert_eq!(err.kind(), io::ErrorKind::Other);
+        });
 }
 
 /// A reader that returns at most `piece` bytes per read, and fails every

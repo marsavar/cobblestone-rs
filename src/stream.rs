@@ -215,6 +215,12 @@ impl EncryptWrite {
         self.poll_flush_pending(write)
     }
 
+    /// Returns true once the final chunk has been written out in full.
+    #[cfg(feature = "tokio")]
+    pub(crate) fn is_complete(&self) -> bool {
+        self.finished && self.pos == self.end
+    }
+
     fn seal(&mut self, last: bool) -> io::Result<()> {
         let tag = match self.enc.seal(&mut self.buf[..self.acc], last) {
             Ok(tag) => tag,
