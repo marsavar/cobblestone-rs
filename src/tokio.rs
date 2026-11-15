@@ -33,7 +33,7 @@
 //! let mut w = EncryptWriter::new(&key, b"file.txt", Vec::new());
 //! w.write_all(b"hello world").await?;
 //! w.shutdown().await?; // Writes the final chunk.
-//! let ciphertext = w.into_inner();
+//! let ciphertext = w.into_inner()?;
 //!
 //! let mut r = DecryptReader::new(&key, b"file.txt", &ciphertext[..]);
 //! let mut plaintext = Vec::new();
@@ -81,7 +81,8 @@ pin_project! {
     /// [`shutdown`](::tokio::io::AsyncWriteExt::shutdown) must be called to
     /// write the final chunk; it then shuts down the inner writer. Dropping
     /// the writer without shutting it down produces a truncated ciphertext,
-    /// which will fail to decrypt.
+    /// which will fail to decrypt. [`into_inner`](Self::into_inner) only
+    /// returns the inner writer once the final chunk has been written.
     pub struct EncryptWriter<W> {
         #[pin]
         inner: W,
@@ -112,9 +113,77 @@ impl<W: AsyncWrite> EncryptWriter<W> {
         &self.inner
     }
 
-    /// Returns the inner writer.
+    /// Returns the inner writer, once the ciphertext is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the final chunk has not been written out, because
+    /// [`shutdown`](::tokio::io::AsyncWriteExt::shutdown) was not called or
+    /// did not succeed. The inner writer then holds a truncated ciphertext.
+    /// The error holds this writer, so that it can be shut down and
+    /// unwrapped again.
+    pub fn into_inner(self) -> Result<W, IntoInnerError<Self>> {
+        if !self.state.is_complete() {
+            return Err(IntoInnerError(Box::new(self)));
+        }
+        Ok(self.inner)
+    }
+}
+
+/// The error returned by [`EncryptWriter::into_inner`] when the writer was
+/// not shut down.
+///
+/// It holds the writer, which [`into_inner`](Self::into_inner) returns. It
+/// converts into an [`io::Error`], so `?` works in functions that return
+/// [`io::Result`].
+///
+/// # Examples
+///
+/// ```
+/// use cobblestone::tokio::EncryptWriter;
+/// use tokio::io::AsyncWriteExt;
+///
+/// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+/// let key = cobblestone::Key::generate();
+/// let mut w = EncryptWriter::new(&key, b"", Vec::new());
+/// w.write_all(b"hello world").await?;
+///
+/// // The final chunk hasn't been written, so the writer is handed back.
+/// let mut w = w.into_inner().unwrap_err().into_inner();
+/// w.shutdown().await?;
+/// let ciphertext = w.into_inner()?;
+/// assert_eq!(cobblestone::decrypt(&key, b"", &ciphertext)?, b"hello world");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
+/// ```
+// The writer is boxed to keep the error small: it holds the AEAD state.
+pub struct IntoInnerError<W>(Box<W>);
+
+impl<W> IntoInnerError<W> {
+    /// Returns the writer that was not shut down.
     pub fn into_inner(self) -> W {
-        self.inner
+        *self.0
+    }
+}
+
+// Not derived, so that the error can be unwrapped whatever the writer is.
+impl<W> fmt::Debug for IntoInnerError<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntoInnerError").finish_non_exhaustive()
+    }
+}
+
+impl<W> fmt::Display for IntoInnerError<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the encryption writer was not shut down")
+    }
+}
+
+impl<W> std::error::Error for IntoInnerError<W> {}
+
+impl<W> From<IntoInnerError<W>> for io::Error {
+    fn from(err: IntoInnerError<W>) -> io::Error {
+        io::Error::other(err.to_string())
     }
 }
 

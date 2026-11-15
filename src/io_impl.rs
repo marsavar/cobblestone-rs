@@ -4,6 +4,8 @@ use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::task::Poll;
 
+use zeroize::Zeroizing;
+
 use crate::raw::{self, AesGcm, CHUNK_SIZE, ChunkCipher, ENC_CHUNK_SIZE, TAG_SIZE};
 use crate::stream;
 use crate::{CobblestoneKey, Error, HEADER_SIZE};
@@ -292,8 +294,8 @@ pub struct RandomAccessDecryptor<R> {
     body_size: u64,
     plaintext_len: u64,
     pos: u64,
-    /// The most recently decrypted chunk.
-    cache: Box<[u8]>,
+    /// The most recently decrypted chunk. It's wiped on drop.
+    cache: Zeroizing<Box<[u8]>>,
     cache_len: usize,
     cache_index: Option<u64>,
 }
@@ -335,7 +337,7 @@ impl<R: Read + Seek> RandomAccessDecryptor<R> {
             body_size,
             plaintext_len: body_size - chunks * TAG_SIZE as u64,
             pos: 0,
-            cache: vec![0; ENC_CHUNK_SIZE].into_boxed_slice(),
+            cache: Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice()),
             cache_len: 0,
             cache_index: None,
         };

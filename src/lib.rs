@@ -296,9 +296,12 @@ pub fn decrypt(
         .unwrap();
     let mut dec = Decryptor::new(open_header(key.variant(), context, header)?);
     let mut body = &ciphertext[HEADER_SIZE..];
-    let size = raw::plaintext_size(body.len() as u64).unwrap_or(0);
-    let mut out = Vec::with_capacity(size as usize);
-    let mut chunk = vec![0; ENC_CHUNK_SIZE];
+    // An invalid size fails later. The body size is then an upper bound, so
+    // that `out` never reallocates and leaves a copy that can't be wiped.
+    let size = raw::plaintext_size(body.len() as u64).unwrap_or(body.len() as u64);
+    // Both hold plaintext. `out` is wiped if a later chunk fails.
+    let mut out = Zeroizing::new(Vec::with_capacity(size as usize));
+    let mut chunk = Zeroizing::new(vec![0; ENC_CHUNK_SIZE]);
     while !dec.is_done() {
         let n = body.len().min(ENC_CHUNK_SIZE);
         chunk[..n].copy_from_slice(&body[..n]);
@@ -306,7 +309,7 @@ pub fn decrypt(
         let len = dec.open(&mut chunk[..n])?;
         out.extend_from_slice(&chunk[..len]);
     }
-    Ok(out)
+    Ok(std::mem::take(&mut *out))
 }
 
 /// Derives the AEAD key, base nonce, and commitment for a message.

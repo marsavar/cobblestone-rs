@@ -8,6 +8,8 @@
 use std::io;
 use std::task::{Poll, ready};
 
+use zeroize::Zeroizing;
+
 use crate::key::sealed::{Variant, VariantRef};
 use crate::raw::{AesGcm, CHUNK_SIZE, Decryptor, ENC_CHUNK_SIZE, Encryptor, TAG_SIZE};
 use crate::{Error, HEADER_SIZE};
@@ -60,7 +62,8 @@ fn poll_flush_buf(
 /// produced.
 pub(crate) struct EncryptRead {
     enc: Encryptor<AesGcm>,
-    buf: Box<[u8]>,
+    /// Holds plaintext, so it's wiped on drop.
+    buf: Zeroizing<Box<[u8]>>,
     /// While `filling`, the length of plaintext accumulated in `buf`.
     /// Otherwise, the end of the output pending in `buf`.
     len: usize,
@@ -72,7 +75,7 @@ pub(crate) struct EncryptRead {
 
 impl EncryptRead {
     pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<AesGcm>) -> Self {
-        let mut buf = vec![0; ENC_CHUNK_SIZE].into_boxed_slice();
+        let mut buf = Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice());
         buf[..HEADER_SIZE].copy_from_slice(&header);
         EncryptRead {
             enc,
@@ -122,7 +125,8 @@ impl EncryptRead {
 /// sink.
 pub(crate) struct EncryptWrite {
     enc: Encryptor<AesGcm>,
-    buf: Box<[u8]>,
+    /// Holds plaintext, so it's wiped on drop.
+    buf: Zeroizing<Box<[u8]>>,
     /// The length of plaintext accumulated in `buf`, when not flushing.
     acc: usize,
     /// The range of output pending in `buf`. Plaintext is accumulated only
@@ -135,7 +139,7 @@ pub(crate) struct EncryptWrite {
 
 impl EncryptWrite {
     pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<AesGcm>) -> Self {
-        let mut buf = vec![0; ENC_CHUNK_SIZE].into_boxed_slice();
+        let mut buf = Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice());
         buf[..HEADER_SIZE].copy_from_slice(&header);
         EncryptWrite {
             enc,
@@ -211,6 +215,12 @@ impl EncryptWrite {
         self.poll_flush_pending(write)
     }
 
+    /// Returns true once the final chunk has been written out in full.
+    #[cfg(feature = "tokio")]
+    pub(crate) fn is_complete(&self) -> bool {
+        self.finished && self.pos == self.end
+    }
+
     fn seal(&mut self, last: bool) -> io::Result<()> {
         let tag = match self.enc.seal(&mut self.buf[..self.acc], last) {
             Ok(tag) => tag,
@@ -242,7 +252,8 @@ enum DecryptPhase {
 /// plaintext is produced, one chunk at a time.
 pub(crate) struct DecryptRead {
     phase: DecryptPhase,
-    buf: Box<[u8]>,
+    /// Holds plaintext, so it's wiped on drop.
+    buf: Zeroizing<Box<[u8]>>,
     /// The amount of ciphertext read into `buf` so far, while reading.
     filled: usize,
     /// The range of plaintext pending in `buf`.
@@ -258,7 +269,7 @@ impl DecryptRead {
                 key: key.into_owned(),
                 context: context.to_vec(),
             },
-            buf: vec![0; ENC_CHUNK_SIZE].into_boxed_slice(),
+            buf: Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice()),
             filled: 0,
             pos: 0,
             end: 0,
