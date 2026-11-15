@@ -9,7 +9,7 @@ description = "Cobblestone-128 chunked encryption (c2sp.org/chunked-encryption),
 keywords = ["cobblestone", "encryption", "streaming", "chunked", "aes-gcm"]
 categories = ["cryptography"]
 # Repository tooling that users of the crate never need.
-exclude = [".github/", "release-please-config.json", ".release-please-manifest.json"]
+exclude = [".github/", "fuzz/", "release-please-config.json", ".release-please-manifest.json"]
 
 [dependencies]
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }

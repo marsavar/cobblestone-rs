@@ -263,6 +263,32 @@ This runs:
 - **Doctests**, including the Rust examples in this file and the README. They run with
   `--all-features`, since one of them needs `tokio`.
 
+### Fuzzing
+
+The `fuzz` directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+targets, which need a nightly toolchain:
+
+```sh
+cargo install cargo-fuzz
+cargo +nightly fuzz run roundtrip
+```
+
+| Target | Property |
+|---|---|
+| `roundtrip` | Every way to encrypt a message gives a ciphertext of the right size, which every way to decrypt turns back into the message. |
+| `tamper` | A truncated, modified, extended or reordered ciphertext is rejected by every way to decrypt, and only a prefix of the message is released before the error. The wrong key or context fails the commitment check. |
+| `random_access` | A `RandomAccessDecryptor` behaves like a cursor over the message, for any sequence of seeks and reads. |
+| `untrusted_input` | Arbitrary bytes never make a decryptor panic, and every way to decrypt agrees on whether they are valid. |
+
+The first three generate messages of up to four chunks, for both
+instantiations, and drive the streams with arbitrary read and write sizes and
+`WouldBlock` errors. They cover the blocking types; the tokio types share
+their state machine but are not fuzzed themselves.
+
+CI runs each target for a minute. To reproduce a failure, download the
+artifact of the failed job and run
+`cargo +nightly fuzz run <target> <path to the artifact>`.
+
 ## Proofs
 
 The chunking layer in `src/raw.rs` has [Kani](https://github.com/model-checking/kani)
