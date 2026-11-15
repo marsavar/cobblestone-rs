@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/marsavar/cobblestone-rs/compare/v0.2.0...v0.3.0) (2026-11-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **tokio:** tokio::EncryptWriter::into_inner now returns Result<W, IntoInnerError<EncryptWriter<W>>> instead of W.
+
+### Features
+
+* **tokio:** make EncryptWriter::into_inner fail unless shut down ([47341ed](https://github.com/marsavar/cobblestone-rs/commit/47341ed74ce33f3f1b081071fe1702328ecdfd0d))
+
+
+### Bug Fixes
+
+* **deps:** bump ctutils to 0.4.8 for RUSTSEC-2026-0385 ([509a639](https://github.com/marsavar/cobblestone-rs/commit/509a639ec77cecacf067f9b4fd62f4b12d78528b))
+
 ## [0.2.0](https://github.com/marsavar/cobblestone-rs/compare/v0.1.0...v0.2.0) (2026-10-31)
 
 
