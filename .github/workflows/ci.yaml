@@ -161,3 +161,43 @@ jobs:
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
+
+  # The Lean proofs are about the model in lean/Cobblestone, which is checked
+  # in. This checks that it's what Charon and Aeneas generate from the current
+  # Rust code. Nix builds Charon and Aeneas from source, which takes a while
+  # when the cache misses.
+  lean-model:
+    name: Lean model up to date
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: experimental-features = nix-command flakes
+      # The key changes with the Aeneas revision pinned in the script.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-aeneas-${{ runner.os }}-${{ hashFiles('scripts/extract-lean.sh') }}
+          restore-prefixes-first-match: nix-aeneas-${{ runner.os }}-
+      - run: ./scripts/extract-lean.sh
+      - run: git diff --exit-code -- lean/Cobblestone
+
+  # Checks the proofs, and that everything defined in the Cobblestone modules
+  # depends only on Lean's standard axioms, which rules out sorry.
+  lean-proofs:
+    name: Lean proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: leanprover/lean-action@ba3fdfe5c4476c925da13bf11a005ddb47e47aee # v1.7.1
+        with:
+          lake-package-directory: lean
+          use-mathlib-cache: true
+          axiom-audit: true
