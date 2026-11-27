@@ -10,8 +10,10 @@ use std::task::{Poll, ready};
 
 use zeroize::Zeroizing;
 
+use crate::buffer::{DecryptBuffer, EncryptBuffer};
 use crate::key::sealed::{Variant, VariantRef};
-use crate::raw::{AesGcm, CHUNK_SIZE, Decryptor, ENC_CHUNK_SIZE, Encryptor, TAG_SIZE};
+use crate::primitives::AesGcm;
+use crate::raw::{Decryptor, ENC_CHUNK_SIZE, Encryptor};
 use crate::{Error, HEADER_SIZE};
 
 /// Reads into `buf[*filled..]` until it's full or the source reaches EOF.
@@ -32,25 +34,23 @@ fn poll_fill(
     Poll::Ready(Ok(false))
 }
 
-/// Copies as much of `buf[*pos..end]` as fits into `dst`.
-fn drain(buf: &[u8], pos: &mut usize, end: usize, dst: &mut [u8]) -> usize {
-    let n = (end - *pos).min(dst.len());
-    dst[..n].copy_from_slice(&buf[*pos..*pos + n]);
-    *pos += n;
+/// Copies as much of `src` as fits into `dst`.
+fn copy_out(src: &[u8], dst: &mut [u8]) -> usize {
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
     n
 }
 
-/// Writes `buf[*pos..end]` to the sink.
-fn poll_flush_buf(
+/// Writes out the pending ciphertext.
+fn poll_drain(
+    state: &mut EncryptBuffer<AesGcm>,
     buf: &[u8],
-    pos: &mut usize,
-    end: usize,
     mut write: impl FnMut(&[u8]) -> Poll<io::Result<usize>>,
 ) -> Poll<io::Result<()>> {
-    while *pos < end {
-        match ready!(write(&buf[*pos..end])) {
+    while !state.is_drained() {
+        match ready!(write(state.pending(buf))) {
             Ok(0) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
-            Ok(n) => *pos += n,
+            Ok(n) => state.advance(n),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Poll::Ready(Err(e)),
         }
@@ -58,32 +58,35 @@ fn poll_flush_buf(
     Poll::Ready(Ok(()))
 }
 
+fn new_encrypt_buffer(
+    header: [u8; HEADER_SIZE],
+    enc: Encryptor<AesGcm>,
+) -> (EncryptBuffer<AesGcm>, Zeroizing<Box<[u8]>>) {
+    let mut buf = Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice());
+    let state = EncryptBuffer::new(enc, &mut buf, &header);
+    (state, buf)
+}
+
 /// Pull-based encryption: plaintext is read from a source and ciphertext is
 /// produced.
 pub(crate) struct EncryptRead {
-    enc: Encryptor<AesGcm>,
+    state: EncryptBuffer<AesGcm>,
     /// Holds plaintext, so it's wiped on drop.
     buf: Zeroizing<Box<[u8]>>,
-    /// While `filling`, the length of plaintext accumulated in `buf`.
-    /// Otherwise, the end of the output pending in `buf`.
-    len: usize,
-    /// The start of the output pending in `buf`.
-    pos: usize,
-    filling: bool,
     eof: bool,
+    /// Sealing a chunk can fail only once the message is too large, which is
+    /// then permanent.
+    failed: Option<Error>,
 }
 
 impl EncryptRead {
     pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<AesGcm>) -> Self {
-        let mut buf = Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice());
-        buf[..HEADER_SIZE].copy_from_slice(&header);
+        let (state, buf) = new_encrypt_buffer(header, enc);
         EncryptRead {
-            enc,
+            state,
             buf,
-            len: HEADER_SIZE,
-            pos: 0,
-            filling: false,
             eof: false,
+            failed: None,
         }
     }
 
@@ -93,30 +96,30 @@ impl EncryptRead {
         mut read: impl FnMut(&mut [u8]) -> Poll<io::Result<usize>>,
     ) -> Poll<io::Result<usize>> {
         loop {
-            if !self.filling && self.pos < self.len {
-                return Poll::Ready(Ok(drain(&self.buf, &mut self.pos, self.len, dst)));
+            if !self.state.is_drained() {
+                let n = copy_out(self.state.pending(&self.buf), dst);
+                self.state.advance(n);
+                return Poll::Ready(Ok(n));
+            }
+            if let Some(err) = &self.failed {
+                return Poll::Ready(Err(err.clone().into()));
             }
             if self.eof || dst.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            if !self.filling {
-                self.filling = true;
-                self.len = 0;
+            let result = match ready!(read(self.state.space(&mut self.buf))) {
+                Ok(0) => {
+                    self.eof = true;
+                    self.state.seal(&mut self.buf, true)
+                }
+                Ok(n) => self.state.filled(&mut self.buf, n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(()),
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            if let Err(err) = result {
+                self.failed = Some(err.clone());
+                return Poll::Ready(Err(err.into()));
             }
-            let eof = ready!(poll_fill(
-                &mut self.buf[..CHUNK_SIZE],
-                &mut self.len,
-                &mut read
-            ))?;
-            let tag = self
-                .enc
-                .seal(&mut self.buf[..self.len], eof)
-                .map_err(io::Error::from)?;
-            self.buf[self.len..self.len + TAG_SIZE].copy_from_slice(&tag);
-            self.len += TAG_SIZE;
-            self.pos = 0;
-            self.filling = false;
-            self.eof = eof;
         }
     }
 }
@@ -124,29 +127,19 @@ impl EncryptRead {
 /// Push-based encryption: plaintext is written and ciphertext is written to a
 /// sink.
 pub(crate) struct EncryptWrite {
-    enc: Encryptor<AesGcm>,
+    state: EncryptBuffer<AesGcm>,
     /// Holds plaintext, so it's wiped on drop.
     buf: Zeroizing<Box<[u8]>>,
-    /// The length of plaintext accumulated in `buf`, when not flushing.
-    acc: usize,
-    /// The range of output pending in `buf`. Plaintext is accumulated only
-    /// when this is empty.
-    pos: usize,
-    end: usize,
     finished: bool,
     failed: bool,
 }
 
 impl EncryptWrite {
     pub(crate) fn new(header: [u8; HEADER_SIZE], enc: Encryptor<AesGcm>) -> Self {
-        let mut buf = Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice());
-        buf[..HEADER_SIZE].copy_from_slice(&header);
+        let (state, buf) = new_encrypt_buffer(header, enc);
         EncryptWrite {
-            enc,
+            state,
             buf,
-            acc: 0,
-            pos: 0,
-            end: HEADER_SIZE,
             finished: false,
             failed: false,
         }
@@ -169,15 +162,11 @@ impl EncryptWrite {
         &mut self,
         write: impl FnMut(&[u8]) -> Poll<io::Result<usize>>,
     ) -> Poll<io::Result<()>> {
-        let res = ready!(poll_flush_buf(&self.buf, &mut self.pos, self.end, write));
+        let res = ready!(poll_drain(&mut self.state, &self.buf, write));
         if let Err(e) = &res
             && e.kind() != io::ErrorKind::WouldBlock
         {
             self.failed = true;
-        }
-        if res.is_ok() {
-            self.pos = 0;
-            self.end = 0;
         }
         Poll::Ready(res)
     }
@@ -189,12 +178,10 @@ impl EncryptWrite {
     ) -> Poll<io::Result<usize>> {
         self.check()?;
         ready!(self.poll_flush_pending(write))?;
-        let n = data.len().min(CHUNK_SIZE - self.acc);
-        self.buf[self.acc..self.acc + n].copy_from_slice(&data[..n]);
-        self.acc += n;
-        if self.acc == CHUNK_SIZE {
-            self.seal(false)?;
-        }
+        let n = self
+            .state
+            .absorb(&mut self.buf, data)
+            .inspect_err(|_| self.failed = true)?;
         Poll::Ready(Ok(n))
     }
 
@@ -209,7 +196,9 @@ impl EncryptWrite {
                 return Poll::Ready(Err(io::Error::other("a previous write failed")));
             }
             ready!(self.poll_flush_pending(&mut write))?;
-            self.seal(true)?;
+            self.state
+                .seal(&mut self.buf, true)
+                .inspect_err(|_| self.failed = true)?;
             self.finished = true;
         }
         self.poll_flush_pending(write)
@@ -218,22 +207,7 @@ impl EncryptWrite {
     /// Returns true once the final chunk has been written out in full.
     #[cfg(feature = "tokio")]
     pub(crate) fn is_complete(&self) -> bool {
-        self.finished && self.pos == self.end
-    }
-
-    fn seal(&mut self, last: bool) -> io::Result<()> {
-        let tag = match self.enc.seal(&mut self.buf[..self.acc], last) {
-            Ok(tag) => tag,
-            Err(e) => {
-                self.failed = true;
-                return Err(e.into());
-            }
-        };
-        self.buf[self.acc..self.acc + TAG_SIZE].copy_from_slice(&tag);
-        self.pos = 0;
-        self.end = self.acc + TAG_SIZE;
-        self.acc = 0;
-        Ok(())
+        self.finished && self.state.is_drained()
     }
 }
 
@@ -245,7 +219,7 @@ enum DecryptPhase {
         key: Variant,
         context: Vec<u8>,
     },
-    Body(Decryptor<AesGcm>),
+    Body(DecryptBuffer<AesGcm>),
 }
 
 /// Pull-based decryption: ciphertext is read from a source and authenticated
@@ -254,11 +228,8 @@ pub(crate) struct DecryptRead {
     phase: DecryptPhase,
     /// Holds plaintext, so it's wiped on drop.
     buf: Zeroizing<Box<[u8]>>,
-    /// The amount of ciphertext read into `buf` so far, while reading.
+    /// The amount of the header read into `buf` so far.
     filled: usize,
-    /// The range of plaintext pending in `buf`.
-    pos: usize,
-    end: usize,
     header_failed: Option<Error>,
 }
 
@@ -271,8 +242,6 @@ impl DecryptRead {
             },
             buf: Zeroizing::new(vec![0; ENC_CHUNK_SIZE].into_boxed_slice()),
             filled: 0,
-            pos: 0,
-            end: 0,
             header_failed: None,
         }
     }
@@ -302,7 +271,7 @@ impl DecryptRead {
         self.filled = 0;
         match result {
             Ok(cipher) => {
-                self.phase = DecryptPhase::Body(Decryptor::new(cipher));
+                self.phase = DecryptPhase::Body(DecryptBuffer::new(Decryptor::new(cipher)));
                 Poll::Ready(Ok(()))
             }
             Err(err) => {
@@ -318,25 +287,30 @@ impl DecryptRead {
         mut read: impl FnMut(&mut [u8]) -> Poll<io::Result<usize>>,
     ) -> Poll<io::Result<usize>> {
         ready!(self.poll_header(&mut read))?;
-        let DecryptPhase::Body(dec) = &mut self.phase else {
+        let DecryptPhase::Body(state) = &mut self.phase else {
             unreachable!("header was read");
         };
         loop {
-            if self.pos < self.end {
-                return Poll::Ready(Ok(drain(&self.buf, &mut self.pos, self.end, dst)));
+            if !state.is_drained() {
+                let n = copy_out(state.pending(&self.buf), dst);
+                state.advance(n);
+                return Poll::Ready(Ok(n));
             }
-            if let Some(err) = dec.failed() {
+            if let Some(err) = state.failed() {
                 return Poll::Ready(Err(err.clone().into()));
             }
-            if dec.is_done() || dst.is_empty() {
+            if state.is_done() || dst.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            ready!(poll_fill(&mut self.buf, &mut self.filled, &mut read))?;
-            let len = dec.open(&mut self.buf[..self.filled]);
-            self.filled = 0;
-            self.pos = 0;
-            self.end = len.as_ref().copied().unwrap_or(0);
-            len?;
+            let full = match ready!(read(state.space(&mut self.buf))) {
+                Ok(0) => true,
+                Ok(n) => state.filled(n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            if full {
+                state.open(&mut self.buf)?;
+            }
         }
     }
 }

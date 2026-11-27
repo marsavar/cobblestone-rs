@@ -50,16 +50,13 @@
 use std::fmt;
 use std::io;
 
-#[cfg(feature = "cobblestone-256")]
-use aes_gcm::Aes256Gcm;
-use aes_gcm::{Aes128Gcm, KeyInit};
-use hmac::{Hmac, Mac};
-use sha2::Sha512;
-use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+mod buffer;
+mod header;
 mod io_impl;
 mod key;
+mod primitives;
 mod raw;
 mod stream;
 #[cfg(test)]
@@ -82,17 +79,15 @@ pub use key::{CobblestoneKey, InvalidKeySize, KEY_SIZE, Key};
 #[cfg(feature = "cobblestone-256")]
 pub use key::{KEY256_SIZE, Key256};
 
+#[cfg(feature = "cobblestone-256")]
+use header::MAX_KEY_SIZE;
+use header::{HASH_SIZE, HEADER_SIZE, OKM_SIZE, SALT_SIZE};
 use key::sealed::VariantRef;
-use raw::{AesGcm, CHUNK_SIZE, ChunkCipher, Decryptor, ENC_CHUNK_SIZE, Encryptor};
+use primitives::{AesGcm, HmacSha512, Subtle};
+use raw::{CHUNK_SIZE, ChunkCipher, Decryptor, ENC_CHUNK_SIZE, Encryptor};
 
-const SALT_SIZE: usize = 24;
-const COMMITMENT_SIZE: usize = 32;
-const NONCE_SIZE: usize = 12;
-/// The largest input key, which is also the largest AEAD key.
-const MAX_KEY_SIZE: usize = 32;
 #[cfg(feature = "cobblestone-256")]
 const _: () = assert!(KEY256_SIZE <= MAX_KEY_SIZE);
-const HEADER_SIZE: usize = SALT_SIZE + COMMITMENT_SIZE;
 
 /// An error encountered while encrypting or decrypting.
 ///
@@ -312,79 +307,14 @@ pub fn decrypt(
     Ok(std::mem::take(&mut *out))
 }
 
-/// Derives the AEAD key, base nonce, and commitment for a message.
-fn derive(
-    key: VariantRef<'_>,
-    salt: &[u8; SALT_SIZE],
-    context: &[u8],
-) -> (ChunkCipher<AesGcm>, [u8; COMMITMENT_SIZE]) {
-    // key || base nonce || commitment = HKDF-Expand(prk = input key,
-    //     info = "c2sp.org/chunked-encryption@v1+" || aead || 0x00 || salt || context)
-    let (prk, info_prefix): (&[u8], &[u8]) = match key {
-        VariantRef::Cobblestone128(k) => (
-            k.as_bytes(),
-            b"c2sp.org/chunked-encryption@v1+AEAD_AES_128_GCM\x00",
-        ),
-        #[cfg(feature = "cobblestone-256")]
-        VariantRef::Cobblestone256(k) => (
-            k.as_bytes(),
-            b"c2sp.org/chunked-encryption@v1+AEAD_AES_256_GCM\x00",
-        ),
-    };
-    // The AEAD key is the same size as the input key.
-    let key_size = prk.len();
-    let mut buf = Zeroizing::new([0; MAX_KEY_SIZE + NONCE_SIZE + COMMITMENT_SIZE]);
-    let out = &mut buf[..key_size + NONCE_SIZE + COMMITMENT_SIZE];
-    hkdf_expand(prk, &[info_prefix, salt, context], out);
-
-    let (aead_key, rest) = out.split_at(key_size);
-    let (nonce, commitment) = rest.split_at(NONCE_SIZE);
-    let aead = match key {
-        VariantRef::Cobblestone128(_) => {
-            AesGcm::Aes128(Aes128Gcm::new_from_slice(aead_key).expect("key size is correct"))
-        }
-        #[cfg(feature = "cobblestone-256")]
-        VariantRef::Cobblestone256(_) => {
-            AesGcm::Aes256(Aes256Gcm::new_from_slice(aead_key).expect("key size is correct"))
-        }
-    };
-    let cipher = ChunkCipher::new(aead, nonce.try_into().unwrap());
-    (cipher, commitment.try_into().unwrap())
-}
-
-/// HKDF-Expand with SHA-512, filling `out`. The info is passed in parts.
-///
-/// The hkdf crate is not used because it rejects PRKs shorter than the hash
-/// output, and Cobblestone uses the input key directly as the PRK.
-fn hkdf_expand(prk: &[u8], info: &[&[u8]], out: &mut [u8]) {
-    // T(i) = HMAC(prk, T(i-1) || info || i), with T(0) empty. Cobblestone-128
-    // needs one block, and Cobblestone-256 two.
-    const HASH_SIZE: usize = 64;
-    assert!(out.len() <= 255 * HASH_SIZE);
-    let mut t = Zeroizing::new([0; HASH_SIZE]);
-    for (i, block) in out.chunks_mut(HASH_SIZE).enumerate() {
-        let mut mac = Hmac::<Sha512>::new_from_slice(prk).expect("HMAC accepts any key size");
-        if i > 0 {
-            mac.update(&*t);
-        }
-        for part in info {
-            mac.update(part);
-        }
-        mac.update(&[i as u8 + 1]);
-        t.copy_from_slice(&mac.finalize().into_bytes());
-        block.copy_from_slice(&t[..block.len()]);
-    }
-}
-
 /// Generates a salt and returns the header and the encryptor for a new message.
 fn new_header(key: VariantRef<'_>, context: &[u8]) -> ([u8; HEADER_SIZE], Encryptor<AesGcm>) {
     let mut salt = [0; SALT_SIZE];
     fill_random(&mut salt);
-    let (cipher, commitment) = derive(key, &salt, context);
-    let mut header = [0; HEADER_SIZE];
-    header[..SALT_SIZE].copy_from_slice(&salt);
-    header[SALT_SIZE..].copy_from_slice(&commitment);
-    (header, Encryptor::new(cipher))
+    let (suite, key) = key.suite();
+    let mut okm = Zeroizing::new([0; OKM_SIZE]);
+    let mut t = Zeroizing::new([0; HASH_SIZE]);
+    header::new_header::<HmacSha512, AesGcm>(suite, key, &salt, context, &mut okm, &mut t)
 }
 
 /// Fills `buf` with random bytes from the operating system.
@@ -402,12 +332,10 @@ fn open_header(
     context: &[u8],
     header: &[u8; HEADER_SIZE],
 ) -> Result<ChunkCipher<AesGcm>, Error> {
-    let (salt, commitment) = header.split_at(SALT_SIZE);
-    let (cipher, expected) = derive(key, salt.try_into().unwrap(), context);
-    if !bool::from(commitment.ct_eq(&expected)) {
-        return Err(Error::InvalidCommitment);
-    }
-    Ok(cipher)
+    let (suite, key) = key.suite();
+    let mut okm = Zeroizing::new([0; OKM_SIZE]);
+    let mut t = Zeroizing::new([0; HASH_SIZE]);
+    header::open_header::<HmacSha512, AesGcm, Subtle>(suite, key, context, header, &mut okm, &mut t)
 }
 
 #[cfg(test)]

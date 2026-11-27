@@ -5,15 +5,6 @@
 //! applications), but it's kept separate so that it can be tested against the
 //! raw mode test vectors, and so that it could become a hazmat API later.
 
-use aes_gcm::Aes128Gcm;
-#[cfg(feature = "cobblestone-256")]
-use aes_gcm::Aes256Gcm;
-use aes_gcm::aead::{
-    AeadCore, AeadInOut, Nonce, Tag, TagPosition,
-    consts::{U12, U16},
-    inout::InOutBuf,
-};
-
 use crate::Error;
 
 /// The size of a plaintext chunk. Every chunk is this size except the final one,
@@ -25,6 +16,8 @@ pub(crate) const TAG_SIZE: usize = 16;
 pub(crate) const ENC_CHUNK_SIZE: usize = CHUNK_SIZE + TAG_SIZE;
 /// The maximum number of chunks in a message, including the final one.
 pub(crate) const MAX_CHUNKS: u64 = 1 << 38;
+/// The size of the AEAD nonce.
+pub(crate) const NONCE_SIZE: usize = 12;
 /// The width of the chunk counter XOR'd into the end of the base nonce.
 const COUNTER_SIZE: usize = 5;
 
@@ -60,63 +53,25 @@ pub(crate) fn ciphertext_size(plaintext_size: u64) -> Option<u64> {
     Some(plaintext_size + chunks * TAG_SIZE as u64)
 }
 
-/// The AEAD of either instantiation, so that the streaming types don't need a
-/// type parameter for it.
-// The size difference is small next to the 16 KiB chunk buffer every stream
-// holds, so boxing the larger variant isn't worth the indirection.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum AesGcm {
-    Aes128(Aes128Gcm),
-    #[cfg(feature = "cobblestone-256")]
-    Aes256(Aes256Gcm),
-}
-
-impl AeadCore for AesGcm {
-    type NonceSize = U12;
-    type TagSize = U16;
-    const TAG_POSITION: TagPosition = TagPosition::Postfix;
-}
-
-impl AeadInOut for AesGcm {
-    fn encrypt_inout_detached(
-        &self,
-        nonce: &Nonce<Self>,
-        associated_data: &[u8],
-        buffer: InOutBuf<'_, '_, u8>,
-    ) -> aes_gcm::aead::Result<Tag<Self>> {
-        match self {
-            AesGcm::Aes128(a) => a.encrypt_inout_detached(nonce, associated_data, buffer),
-            #[cfg(feature = "cobblestone-256")]
-            AesGcm::Aes256(a) => a.encrypt_inout_detached(nonce, associated_data, buffer),
-        }
-    }
-
-    fn decrypt_inout_detached(
-        &self,
-        nonce: &Nonce<Self>,
-        associated_data: &[u8],
-        buffer: InOutBuf<'_, '_, u8>,
-        tag: &Tag<Self>,
-    ) -> aes_gcm::aead::Result<()> {
-        match self {
-            AesGcm::Aes128(a) => a.decrypt_inout_detached(nonce, associated_data, buffer, tag),
-            #[cfg(feature = "cobblestone-256")]
-            AesGcm::Aes256(a) => a.decrypt_inout_detached(nonce, associated_data, buffer, tag),
-        }
-    }
+// Keeping the chunk layer behind this trait, with plain arrays instead of the
+// aead crate's types, is what lets Charon extract it for the Lean proofs.
+/// The AEAD used to seal each chunk, with an empty associated data.
+pub(crate) trait ChunkAead {
+    /// Encrypts `buf` in place and returns its tag.
+    fn seal(&self, nonce: &[u8; NONCE_SIZE], buf: &mut [u8]) -> [u8; TAG_SIZE];
+    /// Decrypts `buf` in place if `tag` authenticates it, and returns whether
+    /// it did.
+    fn open(&self, nonce: &[u8; NONCE_SIZE], buf: &mut [u8], tag: &[u8; TAG_SIZE]) -> bool;
 }
 
 /// An AEAD and base nonce, which can encrypt and decrypt chunks at any index.
 pub(crate) struct ChunkCipher<A> {
     aead: A,
-    base_nonce: [u8; 12],
+    base_nonce: [u8; NONCE_SIZE],
 }
 
-impl<A> ChunkCipher<A>
-where
-    A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
-{
-    pub(crate) fn new(aead: A, base_nonce: &[u8; 12]) -> Self {
+impl<A: ChunkAead> ChunkCipher<A> {
+    pub(crate) fn new(aead: A, base_nonce: &[u8; NONCE_SIZE]) -> Self {
         ChunkCipher {
             aead,
             base_nonce: *base_nonce,
@@ -124,16 +79,16 @@ where
     }
 
     /// The base nonce XOR'd with the chunk index as a big-endian integer.
-    fn nonce(&self, index: u64) -> Nonce<A> {
+    fn nonce(&self, index: u64) -> [u8; NONCE_SIZE] {
         assert!(index < MAX_CHUNKS, "chunk index out of range");
-        let mut nonce = Nonce::<A>::from(self.base_nonce);
+        let mut nonce = self.base_nonce;
         let counter = index.to_be_bytes();
-        let n = nonce.len();
-        for (b, c) in nonce[n - COUNTER_SIZE..]
-            .iter_mut()
-            .zip(&counter[8 - COUNTER_SIZE..])
-        {
-            *b ^= c;
+        // An index loop rather than an iterator chain, which Aeneas can't
+        // translate.
+        let mut i = 0;
+        while i < COUNTER_SIZE {
+            nonce[NONCE_SIZE - COUNTER_SIZE + i] ^= counter[8 - COUNTER_SIZE + i];
+            i += 1;
         }
         nonce
     }
@@ -141,11 +96,7 @@ where
     /// Encrypts `chunk` in place and returns the tag to append to it.
     pub(crate) fn seal(&self, index: u64, chunk: &mut [u8]) -> [u8; TAG_SIZE] {
         debug_assert!(chunk.len() <= CHUNK_SIZE);
-        let tag = self
-            .aead
-            .encrypt_inout_detached(&self.nonce(index), &[], chunk.into())
-            .expect("chunk is within AES-GCM limits");
-        tag.into()
+        self.aead.seal(&self.nonce(index), chunk)
     }
 
     /// Decrypts an encrypted chunk (including its trailing tag) in place,
@@ -156,10 +107,10 @@ where
             return Err(Error::DecryptionFailed { chunk: index });
         };
         let (data, tag) = chunk.split_at_mut(len);
-        let tag = Tag::<A>::try_from(&*tag).expect("tag length is fixed");
-        self.aead
-            .decrypt_inout_detached(&self.nonce(index), &[], data.into(), &tag)
-            .map_err(|_| Error::DecryptionFailed { chunk: index })?;
+        let tag: &[u8; TAG_SIZE] = (&*tag).try_into().expect("tag length is fixed");
+        if !self.aead.open(&self.nonce(index), data, tag) {
+            return Err(Error::DecryptionFailed { chunk: index });
+        }
         Ok(len)
     }
 }
@@ -172,10 +123,7 @@ pub(crate) struct Encryptor<A> {
     finished: bool,
 }
 
-impl<A> Encryptor<A>
-where
-    A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
-{
+impl<A: ChunkAead> Encryptor<A> {
     pub(crate) fn new(cipher: ChunkCipher<A>) -> Self {
         Encryptor {
             cipher,
@@ -214,10 +162,7 @@ pub(crate) struct Decryptor<A> {
     failed: Option<Error>,
 }
 
-impl<A> Decryptor<A>
-where
-    A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
-{
+impl<A: ChunkAead> Decryptor<A> {
     pub(crate) fn new(cipher: ChunkCipher<A>) -> Self {
         Decryptor {
             cipher,
@@ -275,7 +220,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes_gcm::{Aes256Gcm, KeyInit};
+    use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit};
 
     #[test]
     fn sizes() {
@@ -365,7 +310,7 @@ mod tests {
     /// produced before any error.
     fn decrypt_raw<A>(cipher: ChunkCipher<A>, mut body: &[u8]) -> (Vec<u8>, Result<(), Error>)
     where
-        A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
+        A: ChunkAead,
     {
         let mut dec = Decryptor::new(cipher);
         let mut out = Vec::new();
@@ -387,7 +332,7 @@ mod tests {
 
     fn encrypt_raw<A>(cipher: ChunkCipher<A>, msg: &[u8]) -> Vec<u8>
     where
-        A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
+        A: ChunkAead,
     {
         let mut enc = Encryptor::new(cipher);
         let mut out = Vec::new();
@@ -406,7 +351,7 @@ mod tests {
     /// a random access implementation does.
     fn final_chunk_valid<A>(cipher: &ChunkCipher<A>, body: &[u8]) -> bool
     where
-        A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
+        A: ChunkAead,
     {
         let Ok(chunks) = encrypted_chunk_count(body.len() as u64) else {
             return false;
@@ -417,7 +362,7 @@ mod tests {
 
     fn check_vector<A>(v: &vectors::Vector, new_cipher: impl Fn() -> ChunkCipher<A>)
     where
-        A: AeadInOut + AeadCore<NonceSize = U12, TagSize = U16>,
+        A: ChunkAead,
     {
         let body = &v.ct[crate::HEADER_SIZE..];
         let (msg, result) = decrypt_raw(new_cipher(), body);
@@ -478,44 +423,21 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::*;
-    use aes_gcm::aead;
-
     struct NonceAead;
 
-    fn tag_for(nonce: &Nonce<NonceAead>) -> Tag<NonceAead> {
-        let mut tag = Tag::<NonceAead>::default();
-        tag[..nonce.len()].copy_from_slice(nonce);
+    fn tag_for(nonce: &[u8; NONCE_SIZE]) -> [u8; TAG_SIZE] {
+        let mut tag = [0; TAG_SIZE];
+        tag[..NONCE_SIZE].copy_from_slice(nonce);
         tag
     }
 
-    impl AeadCore for NonceAead {
-        type NonceSize = U12;
-        type TagSize = U16;
-        const TAG_POSITION: TagPosition = TagPosition::Postfix;
-    }
-
-    impl AeadInOut for NonceAead {
-        fn encrypt_inout_detached(
-            &self,
-            nonce: &Nonce<Self>,
-            _associated_data: &[u8],
-            _buffer: InOutBuf<'_, '_, u8>,
-        ) -> aead::Result<Tag<Self>> {
-            Ok(tag_for(nonce))
+    impl ChunkAead for NonceAead {
+        fn seal(&self, nonce: &[u8; NONCE_SIZE], _buf: &mut [u8]) -> [u8; TAG_SIZE] {
+            tag_for(nonce)
         }
 
-        fn decrypt_inout_detached(
-            &self,
-            nonce: &Nonce<Self>,
-            _associated_data: &[u8],
-            _buffer: InOutBuf<'_, '_, u8>,
-            tag: &Tag<Self>,
-        ) -> aead::Result<()> {
-            if *tag == tag_for(nonce) {
-                Ok(())
-            } else {
-                Err(aead::Error)
-            }
+        fn open(&self, nonce: &[u8; NONCE_SIZE], _buf: &mut [u8], tag: &[u8; TAG_SIZE]) -> bool {
+            *tag == tag_for(nonce)
         }
     }
 
@@ -576,10 +498,7 @@ mod proofs {
         let mut buf = [0; CHUNK_SIZE];
         match enc.seal(&mut buf[..len], last) {
             Ok(tag) => {
-                assert_eq!(
-                    tag,
-                    <[u8; TAG_SIZE]>::from(tag_for(&enc.cipher.nonce(start)))
-                );
+                assert_eq!(tag, tag_for(&enc.cipher.nonce(start)));
                 assert_eq!(enc.next, start + 1);
                 assert_eq!(enc.finished, last);
                 assert!(enc.finished || enc.next < MAX_CHUNKS);
@@ -644,7 +563,7 @@ mod proofs {
     fn decryptor_accepts_valid_chunks() {
         let (mut dec, start) = any_decryptor();
         let len = kani::any_where(|&len: &usize| (TAG_SIZE..=ENC_CHUNK_SIZE).contains(&len));
-        let tag = tag_for(&dec.cipher.nonce(start)).into();
+        let tag = tag_for(&dec.cipher.nonce(start));
         let mut buf = chunk_with_tag(len, &tag);
         match dec.open(&mut buf) {
             Ok(n) => {
@@ -667,7 +586,7 @@ mod proofs {
         let (mut dec, start) = any_decryptor();
         let len = kani::any_where(|&len: &usize| (TAG_SIZE..=ENC_CHUNK_SIZE).contains(&len));
         let tag: [u8; TAG_SIZE] = kani::any();
-        kani::assume(tag != <[u8; TAG_SIZE]>::from(tag_for(&dec.cipher.nonce(start))));
+        kani::assume(tag != tag_for(&dec.cipher.nonce(start)));
         let mut buf = chunk_with_tag(len, &tag);
         let Err(err) = dec.open(&mut buf) else {
             panic!("an invalid chunk was accepted");

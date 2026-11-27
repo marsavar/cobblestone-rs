@@ -209,7 +209,16 @@ pub(crate) mod sealed {
         Cobblestone256(&'a Key256),
     }
 
-    impl VariantRef<'_> {
+    impl<'a> VariantRef<'a> {
+        /// The instantiation and the key bytes.
+        pub(crate) fn suite(self) -> (crate::header::Suite, &'a [u8]) {
+            match self {
+                VariantRef::Cobblestone128(k) => (crate::header::Suite::Aes128, k.as_bytes()),
+                #[cfg(feature = "cobblestone-256")]
+                VariantRef::Cobblestone256(k) => (crate::header::Suite::Aes256, k.as_bytes()),
+            }
+        }
+
         /// Copies the key, for a decryptor that must keep it until the header
         /// is read.
         pub(crate) fn into_owned(self) -> Variant {
