@@ -76,19 +76,55 @@ handling, and choosing between the blocking and async APIs, see the
 
 This crate was largely written by Claude, Anthropic's AI model, under my
 direction and review. It passes the full Wycheproof test suite for the
-scheme. 
+scheme, and much of it is formally verified (see below).
 
-The chunking layer (chunk sizes, nonces, and the order and finality
-of chunks) also has [Kani](https://github.com/model-checking/kani) proofs
-that check it over every input. The proofs don't cover AES-GCM, which comes
-from RustCrypto's `aes-gcm` crate. They also don't cover this crate's key derivation,
-which the Wycheproof vectors check byte for byte, or the streaming APIs,
-which are tested but not formally verified. 
+This crate itself has not been independently audited. Please report problems
+in the [issue tracker](https://github.com/marsavar/cobblestone-rs/issues), and
+I will do my best to address them.
 
-This crate itself has not been
-independently audited. Please report problems in the
-[issue tracker](https://github.com/marsavar/cobblestone-rs/issues), and I
-will do my best to address them.
+## Formal verification
+
+The Rust code for the chunking layer, the header, and the streaming buffers
+is translated to Lean 4 with [Charon](https://github.com/AeneasVerif/charon)
+and [Aeneas](https://github.com/AeneasVerif/aeneas), and proved correct in
+[`lean/`](https://github.com/marsavar/cobblestone-rs/tree/main/lean). The
+Lean kernel checks the proofs, which depend only on Lean's standard axioms.
+They show that:
+
+- **Header:** HKDF-Expand computes RFC 5869 HKDF-Expand. The AEAD key, base
+  nonce, and commitment are derived as the specification says, with labels
+  that match it byte for byte. A header is accepted exactly when its
+  commitment matches the key, context, and salt.
+- **Chunks:** every chunk of a message gets a different nonce. Sizes, the
+  final chunk, and errors behave as specified, and decrypting an encrypted
+  message returns it.
+- **Integrity:** any ciphertext that decrypts successfully is exactly the
+  encryption of the plaintext it decrypts to. Truncation, reordering, dropped
+  or repeated chunks, and trailing data are always rejected.
+- **Streaming:** the streaming encryptors produce exactly the one-shot
+  ciphertext, and the streaming decryptor exactly the one-shot plaintext,
+  however the data is split into reads and writes. When streaming decryption
+  fails, one-shot decryption fails with the same error.
+
+The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
+abstract functions with the expected behavior, for example that decrypting
+an encrypted chunk returns it. They don't prove that the RustCrypto
+implementations behave that way, or that the scheme is secure, which rests
+on the security of AES-GCM and HKDF. The loops of the in-memory `encrypt` and
+`decrypt` functions are mirrored by hand in Lean rather than translated. The
+proofs also don't cover the I/O handling of the streaming types, the async
+wrappers, random access, constant-time execution, or zeroization.
+[Kani](https://github.com/model-checking/kani) proofs also check the
+chunking layer over every input.
+
+To regenerate the Lean model from the Rust code and check the proofs (this
+needs [Nix](https://nixos.org) and Lean's toolchain manager,
+[elan](https://github.com/leanprover/elan)):
+
+```sh
+./scripts/extract-lean.sh
+cd lean && lake exe cache get && lake build
+```
 
 ## Acknowledgements
 
