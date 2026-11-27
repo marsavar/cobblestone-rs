@@ -6,7 +6,8 @@ use std::task::Poll;
 
 use zeroize::Zeroizing;
 
-use crate::raw::{self, AesGcm, CHUNK_SIZE, ChunkCipher, ENC_CHUNK_SIZE, TAG_SIZE};
+use crate::primitives::AesGcm;
+use crate::raw::{self, CHUNK_SIZE, ChunkCipher, ENC_CHUNK_SIZE, TAG_SIZE};
 use crate::stream;
 use crate::{CobblestoneKey, Error, HEADER_SIZE};
 
