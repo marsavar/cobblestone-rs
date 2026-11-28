@@ -104,16 +104,18 @@ They show that:
 - **Streaming:** the streaming encryptors produce exactly the one-shot
   ciphertext, and the streaming decryptor exactly the one-shot plaintext,
   however the data is split into reads and writes. When streaming decryption
-  fails, one-shot decryption fails with the same error.
+  fails after the header has been accepted, one-shot decryption fails with the
+  same error.
 
 The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
 abstract functions with the expected behavior, for example that decrypting
 an encrypted chunk returns it. They don't prove that the RustCrypto
 implementations behave that way, or that the scheme is secure, which rests
 on the security of AES-GCM and HKDF. The loops of the in-memory `encrypt` and
-`decrypt` functions are mirrored by hand in Lean rather than translated. The
-proofs also don't cover the I/O handling of the streaming types, the async
-wrappers, random access, constant-time execution, or zeroization.
+`decrypt` functions, and the loops in `src/stream.rs` that drive the streaming
+buffers, are mirrored by hand in Lean rather than translated. The proofs also
+don't cover how the streaming types read the header or handle I/O errors, the
+async wrappers, random access, constant-time execution, or zeroization.
 [Kani](https://github.com/model-checking/kani) proofs also check the
 chunking layer over every input.
 

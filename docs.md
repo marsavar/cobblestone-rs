@@ -332,9 +332,9 @@ The README lists what the proofs show and what they assume.
 | `lean/Cobblestone/Types.lean`, `Funs.lean` | The model, generated from the Rust code. Don't edit these by hand. |
 | `lean/Cobblestone/FunsExternal.lean` | Hand-written models of the few standard library functions Aeneas doesn't model. |
 | `lean/Cobblestone/Proofs/Nonce.lean`, `Chunks.lean` | Nonces, and the encryptor and decryptor state machines. |
-| `lean/Cobblestone/Proofs/Message.lean`, `Full.lean` | Round trip and integrity of whole messages. |
+| `lean/Cobblestone/Proofs/Message.lean`, `Full.lean` | Round trip and integrity of whole messages, with hand-written models of the loops of `encrypt` and `decrypt` in `src/lib.rs`. |
 | `lean/Cobblestone/Proofs/Header.lean` | HKDF-Expand, key derivation and the commitment check. |
-| `lean/Cobblestone/Proofs/Stream.lean` | Streaming output equals one-shot output. |
+| `lean/Cobblestone/Proofs/Stream.lean` | Streaming output equals one-shot output, with hand-written models of the loops in `src/stream.rs`. |
 
 Checking the proofs needs Lean's toolchain manager,
 [elan](https://github.com/leanprover/elan), which installs the Lean version

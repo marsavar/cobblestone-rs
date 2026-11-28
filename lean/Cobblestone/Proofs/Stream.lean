@@ -426,6 +426,11 @@ theorem pending_spec (st : EncryptBuffer A) (buf : Slice U8) (hpe : st.pos.val â
   step*
   simp [pend, *]
 
+-- EncOp, encStep, runEnc, runDrains and streamEncrypt below, and DecOp, decStep,
+-- runDec and streamDecrypt further down, are hand-written models of how the
+-- loops in src/stream.rs drive the buffers, which Aeneas doesn't extract. Keep
+-- them in step.
+
 /-- What the streaming wrappers can do to an encrypting buffer: accept written
 plaintext, let a source write any bytes into the free space and report any
 count, or have any amount of the pending output written out or read out. -/
