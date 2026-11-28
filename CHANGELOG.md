@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/marsavar/cobblestone-rs/compare/v0.3.0...v0.3.1) (2026-11-28)
+
+
+### Miscellaneous Chores
+
+* release 0.3.1 ([466150b](https://github.com/marsavar/cobblestone-rs/commit/466150b4526db020c8efabf420fa6fafc87b126d))
+
 ## [0.3.0](https://github.com/marsavar/cobblestone-rs/compare/v0.2.0...v0.3.0) (2026-11-15)
 
 
