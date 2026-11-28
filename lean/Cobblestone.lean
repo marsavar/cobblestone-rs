@@ -9,3 +9,8 @@ public import Cobblestone.Proofs.Message
 public import Cobblestone.Proofs.Header
 public import Cobblestone.Proofs.Full
 public import Cobblestone.Proofs.Stream
+public import Cobblestone.Spec
+public import Cobblestone.Assumptions
+public import Cobblestone.Proofs.Conformance
+public import Cobblestone.Proofs.StreamMessage
+public import Cobblestone.Theorems

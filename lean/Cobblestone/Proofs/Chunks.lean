@@ -1,5 +1,6 @@
 module
 public import Cobblestone.Proofs.Nonce
+public import Cobblestone.Assumptions
 @[expose] public section
 
 open Aeneas Aeneas.Std Result ControlFlow
@@ -9,15 +10,6 @@ namespace cobblestone.raw
 theorem spec_ok_eq {α : Type} {m : Result α} {p : α → Prop} (h : m ⦃ p ⦄) :
     ∃ v, m = ok v ∧ p v := by
   cases m <;> simp_all
-
--- The only facts assumed about the AEAD for the chunk-level specs. The length
--- conditions are guaranteed by Rust (the buffer is a `&mut [u8]`); totality holds
--- because the AES-GCM glue in src/primitives.rs never returns an error for a chunk.
-structure AeadTotal {A : Type} (inst : ChunkAead A) (aead : A) : Prop where
-  seal_ok : ∀ n (b : Slice U8), inst.seal aead n b ⦃ t c =>
-    inst.seal aead n b = ok (t, c) ∧ c.length = b.length ⦄
-  open_ok : ∀ n (c : Slice U8) t, inst.open aead n c t ⦃ v p =>
-    inst.open aead n c t = ok (v, p) ∧ p.length = c.length ⦄
 
 @[step]
 theorem ChunkCipher.seal_spec {A : Type} (inst : ChunkAead A) (self : ChunkCipher A)

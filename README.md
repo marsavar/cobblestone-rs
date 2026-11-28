@@ -91,21 +91,29 @@ and [Aeneas](https://github.com/AeneasVerif/aeneas), and proved correct in
 Lean kernel checks the proofs, which depend only on Lean's standard axioms.
 They show that:
 
-- **Header:** HKDF-Expand computes RFC 5869 HKDF-Expand. The AEAD key, base
-  nonce, and commitment are derived as the specification says, with labels
-  that match it byte for byte. A header is accepted exactly when its
-  commitment matches the key, context, and salt.
-- **Chunks:** every chunk of a message gets a different nonce. Sizes, the
-  final chunk, and errors behave as specified, and decrypting an encrypted
-  message returns it.
-- **Integrity:** any ciphertext that decrypts successfully is exactly the
-  encryption of the plaintext it decrypts to. Truncation, reordering, dropped
-  or repeated chunks, and trailing data are always rejected.
+- **Specification:** encryption outputs exactly the ciphertext the
+  specification defines, which is stated in Lean directly from the
+  specification text, without reference to the code. Decryption accepts
+  exactly the specification's ciphertexts, and returns their message, so
+  truncation, reordering, dropped or repeated chunks, and trailing data are
+  always rejected.
+- **Header:** HKDF-Expand computes RFC 5869 HKDF-Expand, and a header is
+  accepted exactly when its commitment matches the key, context, and salt.
+- **Chunks:** every chunk of a message gets a different nonce, and sizes, the
+  final chunk, and errors behave as specified.
 - **Streaming:** the streaming encryptors produce exactly the one-shot
   ciphertext, and the streaming decryptor exactly the one-shot plaintext,
   however the data is split into reads and writes. When streaming decryption
   fails after the header has been accepted, one-shot decryption fails with the
   same error.
+
+Three short files hold everything a reviewer needs to read:
+[`Spec.lean`](https://github.com/marsavar/cobblestone-rs/blob/main/lean/Cobblestone/Spec.lean)
+states the scheme,
+[`Assumptions.lean`](https://github.com/marsavar/cobblestone-rs/blob/main/lean/Cobblestone/Assumptions.lean)
+what is assumed about the primitives, and
+[`Theorems.lean`](https://github.com/marsavar/cobblestone-rs/blob/main/lean/Cobblestone/Theorems.lean)
+what is proved.
 
 The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
 abstract functions with the expected behavior, for example that decrypting
