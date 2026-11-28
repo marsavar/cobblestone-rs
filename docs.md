@@ -325,7 +325,34 @@ To run a single proof, add `--harness <name>`, for example `--harness nonces_are
 The chunk layer, the header and the stream buffering are translated to Lean 4
 by [Charon](https://github.com/AeneasVerif/charon) and
 [Aeneas](https://github.com/AeneasVerif/aeneas), and proved correct in `lean/`.
-The README lists what the proofs show and what they assume.
+The Lean kernel checks the proofs, which depend only on Lean's standard axioms.
+They show that:
+
+- **Specification:** encryption outputs exactly the ciphertext the
+  specification defines, which is stated in Lean directly from the
+  specification text, without reference to the code. Decryption accepts
+  exactly the specification's ciphertexts, and returns their message, so
+  truncation, reordering, dropped or repeated chunks, and trailing data are
+  always rejected.
+- **Header:** HKDF-Expand computes RFC 5869 HKDF-Expand, and a header is
+  accepted exactly when its commitment matches the key, context, and salt.
+- **Chunks:** every chunk of a message gets a different nonce, and sizes, the
+  final chunk, and errors behave as specified.
+- **Streaming:** the streaming encryptors produce exactly the one-shot
+  ciphertext, and the streaming decryptor exactly the one-shot plaintext,
+  however the data is split into reads and writes. When streaming decryption
+  fails after the header has been accepted, one-shot decryption fails with the
+  same error.
+
+The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
+abstract functions with the expected behavior, for example that decrypting
+an encrypted chunk returns it. They don't prove that the RustCrypto
+implementations behave that way, or that the scheme is secure, which rests
+on the security of AES-GCM and HKDF. The loops of the in-memory `encrypt` and
+`decrypt` functions, and the loops in `src/stream.rs` that drive the streaming
+buffers, are mirrored by hand in Lean rather than translated. The proofs also
+don't cover how the streaming types read the header or handle I/O errors, the
+async wrappers, random access, constant-time execution, or zeroization.
 
 These three files are the ones to review. Everything else only needs to be
 checked by Lean:
