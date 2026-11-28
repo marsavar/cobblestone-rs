@@ -107,14 +107,6 @@ They show that:
   fails after the header has been accepted, one-shot decryption fails with the
   same error.
 
-Three short files hold everything a reviewer needs to read:
-[`Spec.lean`](https://github.com/marsavar/cobblestone-rs/blob/main/lean/Cobblestone/Spec.lean)
-states the scheme,
-[`Assumptions.lean`](https://github.com/marsavar/cobblestone-rs/blob/main/lean/Cobblestone/Assumptions.lean)
-what is assumed about the primitives, and
-[`Theorems.lean`](https://github.com/marsavar/cobblestone-rs/blob/main/lean/Cobblestone/Theorems.lean)
-what is proved.
-
 The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
 abstract functions with the expected behavior, for example that decrypting
 an encrypted chunk returns it. They don't prove that the RustCrypto
@@ -128,7 +120,7 @@ async wrappers, random access, constant-time execution, or zeroization.
 chunking layer over every input.
 
 See [Proofs](https://github.com/marsavar/cobblestone-rs/blob/main/docs.md#proofs)
-in the documentation for how to check them.
+in the documentation for how the proofs are organized and how to check them.
 
 ## Acknowledgements
 
