@@ -24,6 +24,12 @@ In these statements:
 - `macI`, `initI` and `ctI` are HMAC-SHA-512, AES-GCM and the constant-time
   comparison as the code reaches them, and `P` the primitives of the
   specification.
+
+The specification defines encryption, `spec.encrypt`, but not a decryption
+function. So encryption is proved equal to it, while decryption is proved to
+accept exactly its ciphertexts and return their messages (`decrypt_sound` and
+`decrypt_complete`). Which error decryption returns for an invalid ciphertext is
+not part of the specification, and is not part of these theorems.
 -/
 
 open Aeneas Aeneas.Std Result

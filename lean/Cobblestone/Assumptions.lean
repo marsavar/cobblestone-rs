@@ -93,7 +93,15 @@ def toSuite : Instantiation → Suite
 
 /-- The AEAD the implementation creates and calls computes the specification's
 AEAD: sealing `b` under nonce `n` with the AEAD created from key `k` gives the
-ciphertext followed by the tag, `aeadSeal k n b`. -/
+ciphertext followed by the tag, `aeadSeal k n b`.
+
+`Primitives.aeadSeal` stands for the instantiation's AEAD encryption (AES-128-GCM
+or AES-256-GCM) with empty associated data, returning the ciphertext followed by
+the 16-byte tag. That it is that function, and not some other one, is what this
+contract and the choice of `P` assert; Lean has no model of AES-GCM to check it
+against. `spec.encrypt_calls` shows the specification only applies it to keys
+of the instantiation's length and 12-byte nonces, which are the inputs AES-GCM
+is defined on here. -/
 structure SealImplements {A : Type} (P : Primitives) (initI : AeadInit A) : Prop where
   sealed : ∀ i (k : Slice U8) a, initI.new (toSuite i) k = ok a →
     ∀ n (b : Slice U8) t c, initI.rawChunkAeadInst.seal a n b = ok (t, c) →

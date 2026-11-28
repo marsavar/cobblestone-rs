@@ -194,7 +194,14 @@ theorem encryptMsg_eq_spec (hM : MacLaws macI P.hmac st) (hI : AeadInitLaws init
       rw [derived, hkdfExpand_eq _ _ _ _ hL, info_eq]
       congr 1; simp only [Slice.length] at hk; simp [hk, nonceLen, commitmentLen]
     have hkl : keyLen ins = key.val.length := by simp only [Slice.length] at hk; omega
-    rw [spec.encrypt, ite_eq_right (by omega)]
+    have hsl : salt.val.length = saltLen := by simp [saltLen]
+    have hkl2 : key.val.length = keyLen ins := hk
+    rw [spec.encrypt, ite_eq_right (by
+      intro hc
+      rcases hc with h1 | h2 | h3
+      · exact h1 hkl2
+      · exact h2 hsl
+      · omega)]
     simp only [Option.some.injEq]
     rw [hbytes, hcm, bodyFrom, aeadKey, baseNonce, commitment, hder, hkl, ← hkS,
       show nonceLen = 12 from rfl, ← hbase]
@@ -280,7 +287,7 @@ theorem decryptMsg_complete (hM : MacLaws macI P.hmac st) (hI : AeadInitLaws ini
   have hk' : key.length = suiteKeyLen (toSuite ins) := by rw [hk, keyLen_eq]
   have hbound : numChunks m ≤ maxChunks := by
     by_contra hc
-    rw [spec.encrypt, ite_eq_left (by omega)] at h
+    rw [spec.encrypt, ite_eq_left (Or.inr (Or.inr (by omega)))] at h
     cases h
   obtain ⟨ct', hspec, henc⟩ :=
     encryptMsg_eq_spec hM hI hS hA ins key hk salt context okm t m hbound

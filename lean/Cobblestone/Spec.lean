@@ -102,16 +102,108 @@ wide as the nonce. -/
 def chunkNonce (base : Bytes) (i : Nat) : Bytes :=
   List.zipWith (· ^^^ ·) base (bigEndian nonceLen i)
 
-/-- The ciphertext of `m`, or `none` if it exceeds 2^38 chunks: salt ||
-commitment || the AEAD ciphertexts of the chunks. The input key must be
-`keyLen inst` bytes and the salt `saltLen` bytes. -/
+/-- The ciphertext of `m`: salt || commitment || the AEAD ciphertexts of the
+chunks. `none` if the input key isn't `keyLen inst` bytes, the salt isn't
+`saltLen` bytes, or `m` exceeds 2^38 chunks. -/
 def encrypt (P : Primitives) (inst : Instantiation) (inputKey salt context m : Bytes) :
     Option Bytes :=
-  if numChunks m > maxChunks then none
+  if inputKey.length ≠ keyLen inst ∨ salt.length ≠ saltLen ∨ numChunks m > maxChunks then none
   else
     let key := aeadKey P inst inputKey salt context
     let base := baseNonce P inst inputKey salt context
     some (salt ++ commitment P inst inputKey salt context ++
       (List.range (numChunks m)).flatMap fun i => P.aeadSeal inst key (chunkNonce base i) (chunk m i))
+
+/-! ## Checks on the definitions
+
+These follow from the definitions above, and confirm that `encrypt` only uses
+the primitives as the specification does.
+-/
+
+theorem hkdfT_length (P : Primitives) (prk info : Bytes) (i : Nat) (hi : 0 < i) :
+    (hkdfT P prk info i).length = 64 := by
+  cases i with
+  | zero => omega
+  | succ i => simp [hkdfT]
+
+theorem hkdfExpand_length (P : Primitives) (prk info : Bytes) (L : Nat) :
+    (hkdfExpand P prk info L).length = L := by
+  have h : ∀ n, ((List.range n).flatMap fun i => hkdfT P prk info (i + 1)).length = 64 * n := by
+    intro n
+    induction n with
+    | zero => simp
+    | succ n ih =>
+      rw [List.range_succ, List.flatMap_append, List.length_append, ih]
+      simp [hkdfT_length]; ring
+  simp only [hkdfExpand, List.length_take, h]; omega
+
+/-- The AEAD key is `keyLen inst` bytes. -/
+theorem aeadKey_length (P : Primitives) (inst : Instantiation) (inputKey salt context : Bytes) :
+    (aeadKey P inst inputKey salt context).length = keyLen inst := by
+  simp [aeadKey, derived, hkdfExpand_length]; omega
+
+/-- The base nonce is `nonceLen` bytes. -/
+theorem baseNonce_length (P : Primitives) (inst : Instantiation)
+    (inputKey salt context : Bytes) :
+    (baseNonce P inst inputKey salt context).length = nonceLen := by
+  simp [baseNonce, derived, hkdfExpand_length]; omega
+
+/-- The commitment is `commitmentLen` bytes. -/
+theorem commitment_length (P : Primitives) (inst : Instantiation)
+    (inputKey salt context : Bytes) :
+    (commitment P inst inputKey salt context).length = commitmentLen := by
+  simp [commitment, derived, hkdfExpand_length]
+
+/-- Chunk nonces are `nonceLen` bytes. -/
+theorem chunkNonce_length (base : Bytes) (h : base.length = nonceLen) (i : Nat) :
+    (chunkNonce base i).length = nonceLen := by
+  simp [chunkNonce, bigEndian, h]
+
+/-- Every chunk but the last is a full chunk, and the last is shorter. -/
+theorem chunk_length (m : Bytes) (i : Nat) (hi : i < numChunks m) :
+    (chunk m i).length = if i + 1 < numChunks m then chunkSize else m.length % chunkSize := by
+  have hn : numChunks m = m.length / 16384 + 1 := rfl
+  rw [hn] at hi
+  by_cases h : i + 1 < numChunks m
+  · simp only [h, ite_true, chunk, chunkSize, List.length_take, List.length_drop]
+    rw [hn] at h; omega
+  · simp only [h, ite_false, chunk, chunkSize, List.length_take, List.length_drop]
+    rw [hn] at h; omega
+
+/-- The plaintext is the concatenation of its chunks. -/
+theorem chunks_concat (m : Bytes) :
+    (List.range (numChunks m)).flatMap (chunk m) = m := by
+  by_cases hs : m.length < chunkSize
+  · have hn : numChunks m = 1 := by simp only [numChunks, chunkSize] at *; omega
+    simp [hn, chunk, List.take_of_length_le (le_of_lt hs)]
+  · have hn : numChunks m = numChunks (m.drop chunkSize) + 1 := by
+      simp only [numChunks, chunkSize, List.length_drop] at *; omega
+    have h2 : ∀ j, chunk m (j + 1) = chunk (m.drop chunkSize) j := by
+      intro j; simp only [chunk, List.drop_drop]; congr 2; ring
+    rw [hn, List.range_succ_eq_map, List.flatMap_cons, List.flatMap_map]
+    have hf : (fun j => chunk m (Nat.succ j)) = chunk (m.drop chunkSize) := by
+      funext j; exact h2 j
+    simp only [hf, chunks_concat (m.drop chunkSize)]
+    simp [chunk, List.take_append_drop]
+termination_by m.length
+decreasing_by
+  have : chunkSize = 16384 := rfl
+  simp only [List.length_drop]; omega
+
+/-- Every AEAD call `encrypt` makes uses a key of `keyLen inst` bytes, a nonce of
+`nonceLen` bytes, and a chunk index below `maxChunks`, so `bigEndian`'s
+reduction modulo 2^96 never applies. -/
+theorem encrypt_calls (P : Primitives) (inst : Instantiation) (inputKey salt context m : Bytes)
+    (ct : Bytes) (h : encrypt P inst inputKey salt context m = some ct) (i : Nat)
+    (hi : i < numChunks m) :
+    (aeadKey P inst inputKey salt context).length = keyLen inst ∧
+    (chunkNonce (baseNonce P inst inputKey salt context) i).length = nonceLen ∧
+    i < maxChunks := by
+  have hb : numChunks m ≤ maxChunks := by
+    by_contra hc
+    simp only [encrypt] at h
+    rw [ite_eq_left (Or.inr (Or.inr (by omega)))] at h
+    cases h
+  exact ⟨aeadKey_length .., chunkNonce_length _ (baseNonce_length ..) i, by omega⟩
 
 end cobblestone.spec
