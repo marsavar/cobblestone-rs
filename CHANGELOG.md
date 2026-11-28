@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.1](https://github.com/marsavar/cobblestone-rs/compare/v0.3.0...v0.3.1) (2026-11-28)
+
+
+### Code Refactoring
+
+* The header code (HKDF-Expand, key derivation and the commitment check), the
+  chunk layer and the buffering of the streaming types are restructured behind
+  small traits for the primitives, and the streaming types' I/O is separated
+  from their buffering, so that this code can be formally verified. Behavior,
+  the public API and the ciphertext format are unchanged: the Wycheproof test
+  vectors pass for both instantiations, and benchmarks show no measurable cost.
+
+### Verification
+
+* The restructured code is formally verified in Lean, including that
+  encryption and decryption conform to a Lean statement of the C2SP
+  specification. See the README for what the proofs cover and what they
+  assume.
+
 ## [0.3.0](https://github.com/marsavar/cobblestone-rs/compare/v0.2.0...v0.3.0) (2026-11-15)
 
 
