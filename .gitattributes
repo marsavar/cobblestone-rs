@@ -1,0 +1,7 @@
+# The Lean proofs check the library rather than being part of it, so they don't
+# count toward the repository's languages. The model is generated from the Rust
+# code, so pull request diffs collapse it.
+lean/** linguist-detectable=false
+lean/Cobblestone/Types.lean linguist-generated
+lean/Cobblestone/Funs.lean linguist-generated
+lean/Cobblestone/FunsExternal_Template.lean linguist-generated
