@@ -117,14 +117,8 @@ wrappers, random access, constant-time execution, or zeroization.
 [Kani](https://github.com/model-checking/kani) proofs also check the
 chunking layer over every input.
 
-To regenerate the Lean model from the Rust code and check the proofs (this
-needs [Nix](https://nixos.org) and Lean's toolchain manager,
-[elan](https://github.com/leanprover/elan)):
-
-```sh
-./scripts/extract-lean.sh
-cd lean && lake exe cache get && lake build
-```
+See [Proofs](https://github.com/marsavar/cobblestone-rs/blob/main/docs.md#proofs)
+in the documentation for how to check them.
 
 ## Acknowledgements
 

@@ -233,12 +233,16 @@ time another task was kept waiting:
 ## Implementation notes
 
 - The crypto comes from RustCrypto (`aes-gcm`, `hmac`, `sha2`). HKDF-Expand is
-  written by hand on top of `hmac`, because the `hkdf` crate rejects PRKs
-  shorter than the hash output, and Cobblestone uses the input key directly as
-  the PRK.
-- The blocking and async types share one I/O-free state machine
-  (`src/stream.rs`), so truncation, chunk counting and sticky errors are
-  implemented once.
+  written by hand on top of `hmac` (in `src/header.rs`), because the `hkdf`
+  crate rejects PRKs shorter than the hash output, and Cobblestone uses the
+  input key directly as the PRK.
+- The header (`src/header.rs`), the chunk layer (`src/raw.rs`) and the stream
+  buffering (`src/buffer.rs`) use the primitives through small traits,
+  implemented in `src/primitives.rs`, and do no I/O. This is what lets them be
+  translated to Lean (see [Proofs](#proofs)).
+- The blocking and async types share the same buffering (`src/buffer.rs`) and
+  the same I/O loops (`src/stream.rs`), so truncation, chunk counting and
+  sticky errors are implemented once.
 - Raw mode (caller-supplied AEAD key and base nonce) is implemented internally
   in `src/raw.rs` but not exposed. The spec says libraries SHOULD NOT expose it
   to applications. It is tested against the raw-mode vectors for both
@@ -291,6 +295,8 @@ artifact of the failed job and run
 
 ## Proofs
 
+### Kani
+
 The chunking layer in `src/raw.rs` has [Kani](https://github.com/model-checking/kani)
 proofs, which check it over every input rather than over samples: chunk and
 ciphertext sizes, nonce uniqueness, and the order and finality of chunks in
@@ -313,3 +319,49 @@ cargo kani --lib
 
 To run them in parallel, add `--jobs --output-format terse`. 
 To run a single proof, add `--harness <name>`, for example `--harness nonces_are_unique`.
+
+### Lean
+
+The chunk layer, the header and the stream buffering are translated to Lean 4
+by [Charon](https://github.com/AeneasVerif/charon) and
+[Aeneas](https://github.com/AeneasVerif/aeneas), and proved correct in `lean/`.
+The README lists what the proofs show and what they assume.
+
+| File | Contents |
+|---|---|
+| `lean/Cobblestone/Types.lean`, `Funs.lean` | The model, generated from the Rust code. Don't edit these by hand. |
+| `lean/Cobblestone/FunsExternal.lean` | Hand-written models of the few standard library functions Aeneas doesn't model. |
+| `lean/Cobblestone/Proofs/Nonce.lean`, `Chunks.lean` | Nonces, and the encryptor and decryptor state machines. |
+| `lean/Cobblestone/Proofs/Message.lean`, `Full.lean` | Round trip and integrity of whole messages. |
+| `lean/Cobblestone/Proofs/Header.lean` | HKDF-Expand, key derivation and the commitment check. |
+| `lean/Cobblestone/Proofs/Stream.lean` | Streaming output equals one-shot output. |
+
+Checking the proofs needs Lean's toolchain manager,
+[elan](https://github.com/leanprover/elan), which installs the Lean version
+pinned in `lean/lean-toolchain`:
+
+```sh
+cd lean
+lake exe cache get   # downloads prebuilt Mathlib
+lake build
+```
+
+After changing `src/raw.rs`, `src/header.rs` or `src/buffer.rs`, regenerate
+the model, which needs [Nix](https://nixos.org), and update the proofs if they
+no longer build:
+
+```sh
+./scripts/extract-lean.sh
+```
+
+The script pins Charon and Aeneas to one Aeneas revision, which must match the
+one `lean/lakefile.lean` requires. Without a binary cache, Nix builds them from
+source the first time, which takes a while. If the Rust code starts using a
+standard library function Aeneas doesn't model, the script updates
+`FunsExternal_Template.lean`, and `FunsExternal.lean` needs a matching
+definition.
+
+CI checks that the committed model is what the script generates from the
+current Rust code, and that the proofs build and depend only on Lean's
+standard axioms (`propext`, `Classical.choice` and `Quot.sound`), which rules
+out `sorry`.
