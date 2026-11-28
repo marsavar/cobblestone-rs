@@ -12,7 +12,7 @@ theorem spec_ok_eq {α : Type} {m : Result α} {p : α → Prop} (h : m ⦃ p �
 
 -- The only facts assumed about the AEAD for the chunk-level specs. The length
 -- conditions are guaranteed by Rust (the buffer is a `&mut [u8]`); totality holds
--- because the AES-GCM glue in src/aead.rs never returns an error for a chunk.
+-- because the AES-GCM glue in src/primitives.rs never returns an error for a chunk.
 structure AeadTotal {A : Type} (inst : ChunkAead A) (aead : A) : Prop where
   seal_ok : ∀ n (b : Slice U8), inst.seal aead n b ⦃ t c =>
     inst.seal aead n b = ok (t, c) ∧ c.length = b.length ⦄
