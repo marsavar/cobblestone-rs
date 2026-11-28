@@ -41,6 +41,28 @@ open spec raw header conformance buffer
 variable {M A C : Type} {macI : Mac M} {initI : AeadInit A} {ctI : CtEq C} {P : Primitives}
   {st : M → List U8 × List U8}
 
+/-- Key derivation computes the specification: the AEAD is created from
+`spec.aeadKey`, and the base nonce and commitment are `spec.baseNonce` and
+`spec.commitment`. -/
+theorem derive_conforms (hM : MacLaws macI P.hmac st) (hI : AeadInitLaws initI)
+    (ins : Instantiation) (key : Slice U8) (hk : key.length = keyLen ins)
+    (salt : Std.Array U8 24#usize) (context : Slice U8) (okm : Std.Array U8 76#usize)
+    (t : Std.Array U8 64#usize) :
+    derive macI initI (toSuite ins) key salt context okm t ⦃ cc _ _ =>
+      (∃ k : Slice U8, k.val = aeadKey P ins key.val salt.val context.val ∧
+        initI.new (toSuite ins) k = ok cc.1.aead) ∧
+      cc.1.base_nonce.val = baseNonce P ins key.val salt.val context.val ∧
+      cc.2.val = commitment P ins key.val salt.val context.val ⦄ :=
+  derive_eq_spec hM hI ins key hk salt context okm t
+
+/-- Chunk nonces compute the specification: for every chunk index the encryptor
+and decryptor can use, the nonce is `spec.chunkNonce` of the base nonce. -/
+theorem nonce_conforms (inst : ChunkAead A) (cipher : ChunkCipher A) (i : U64)
+    (hi : i.val < maxChunks) (n : Std.Array U8 12#usize)
+    (hn : ChunkCipher.nonce inst cipher i = ok n) :
+    n.val = chunkNonce cipher.base_nonce.val i.val :=
+  nonce_eq_chunkNonce inst cipher i hi n hn
+
 /-- Encryption computes the specification: for every key of the instantiation's
 size, salt, context, and message of at most 2^38 chunks, `encrypt` succeeds and
 returns `spec.encrypt`. -/

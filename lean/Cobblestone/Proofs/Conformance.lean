@@ -170,6 +170,36 @@ decreasing_by simp; omega
 variable {M A C : Type} {macI : Mac M} {initI : AeadInit A} {ctI : CtEq C} {P : Primitives}
   {st : M → List U8 × List U8}
 
+theorem derived_eq (ins : Instantiation) (key : Slice U8) (hk : key.length = keyLen ins)
+    (salt context : Bytes) :
+    derived P ins key.val salt context =
+      header.hkdfExpand P.hmac key.val (suiteLabel (toSuite ins) ++ salt ++ context)
+        (key.val.length + 44) := by
+  have hL : keyLen ins + nonceLen + commitmentLen ≤ 255 * 64 := by
+    cases ins <;> simp [keyLen, nonceLen, commitmentLen]
+  rw [derived, hkdfExpand_eq _ _ _ _ hL, info_eq]
+  congr 1; simp only [Slice.length] at hk; simp [hk, nonceLen, commitmentLen]
+
+/-- Key derivation computes the specification: `derive` returns the AEAD created
+from `spec.aeadKey`, `spec.baseNonce` as the base nonce, and `spec.commitment`. -/
+theorem derive_eq_spec (hM : MacLaws macI P.hmac st) (hI : AeadInitLaws initI)
+    (ins : Instantiation) (key : Slice U8) (hk : key.length = keyLen ins)
+    (salt : Std.Array U8 24#usize) (context : Slice U8) (okm : Std.Array U8 76#usize)
+    (t : Std.Array U8 64#usize) :
+    derive macI initI (toSuite ins) key salt context okm t ⦃ cc _ _ =>
+      (∃ k : Slice U8, k.val = aeadKey P ins key.val salt.val context.val ∧
+        initI.new (toSuite ins) k = ok cc.1.aead) ∧
+      cc.1.base_nonce.val = baseNonce P ins key.val salt.val context.val ∧
+      cc.2.val = commitment P ins key.val salt.val context.val ⦄ := by
+  have hk' : key.length = suiteKeyLen (toSuite ins) := by rw [hk, keyLen_eq]
+  have hkl : keyLen ins = key.val.length := by simp only [Slice.length] at hk; omega
+  apply WP.spec_mono (derive_spec hM hI (toSuite ins) key salt context okm t hk')
+  rintro ⟨⟨c, cm⟩, okm1, t1⟩ ⟨⟨kS, hkS, hnew⟩, hbase, hcm⟩
+  refine ⟨⟨kS, ?_, hnew⟩, ?_, ?_⟩
+  · rw [hkS, aeadKey, derived_eq ins key hk, hkl]
+  · rw [hbase, baseNonce, derived_eq ins key hk, hkl]; rfl
+  · rw [hcm, commitment, derived_eq ins key hk, hkl]; rfl
+
 /-- Encryption computes the specification. -/
 theorem encryptMsg_eq_spec (hM : MacLaws macI P.hmac st) (hI : AeadInitLaws initI)
     (hS : SealImplements P initI) (hA : ∀ a, AeadTotal initI.rawChunkAeadInst a)
