@@ -6,15 +6,6 @@ open Aeneas Aeneas.Std Result
 
 namespace cobblestone.header
 
--- The only facts assumed about the MAC: through an abstraction of its state,
--- `new` starts an empty message, `update` appends to it, and `finalize` returns
--- `hmac key message`. `hmac` itself is left abstract.
-structure MacLaws {M : Type} (inst : Mac M) (hmac : List U8 → List U8 → Std.Array U8 64#usize)
-    (st : M → List U8 × List U8) : Prop where
-  new_spec : ∀ k : Slice U8, inst.new k ⦃ m => st m = (k.val, []) ⦄
-  update_spec : ∀ m (d : Slice U8), inst.update m d ⦃ m' => st m' = ((st m).1, (st m).2 ++ d.val) ⦄
-  finalize_spec : ∀ m, inst.finalize m ⦃ t => t = hmac (st m).1 (st m).2 ⦄
-
 def hkdfT (hmac : List U8 → List U8 → Std.Array U8 64#usize) (prk info : List U8) :
     Nat → List U8
   | 0 => []
@@ -198,15 +189,6 @@ def suiteLabel : Suite → List U8
   | .Aes128 => asciiBytes "c2sp.org/chunked-encryption@v1+AEAD_AES_128_GCM" ++ [⟨0#8⟩]
   | .Aes256 => asciiBytes "c2sp.org/chunked-encryption@v1+AEAD_AES_256_GCM" ++ [⟨0#8⟩]
 
-def suiteKeyLen : Suite → Nat
-  | .Aes128 => 16
-  | .Aes256 => 32
-
--- The only fact assumed about creating the AEAD: it succeeds for a key of the
--- instantiation's size. It is deterministic because it is a function.
-structure AeadInitLaws {A : Type} (inst : AeadInit A) : Prop where
-  new_ok : ∀ s (k : Slice U8), k.length = suiteKeyLen s → inst.new s k ⦃ a => inst.new s k = ok a ⦄
-
 def Derived {A : Type} (initI : AeadInit A) (hmac : List U8 → List U8 → Std.Array U8 64#usize)
     (suite : Suite) (key salt context : List U8) (cipher : raw.ChunkCipher A)
     (commitment : Std.Array U8 32#usize) : Prop :=
@@ -286,11 +268,6 @@ theorem new_header_spec {A : Type} {initI : AeadInit A} (hM : MacLaws inst hmac 
   rw [s3_post2, s5_post, s4_post, s_post2, s2_post, s1_post]
   simp [List.setSlice!, SALT_SIZE_val, Aeneas.Std.Array.val_to_slice]
   rw [List.take_of_length_le (by simp), List.take_of_length_le (by simp)]
-
--- The only fact assumed about the comparison: it is equality. That it runs in
--- constant time is outside what these proofs can express.
-structure CtEqLaws {C : Type} (inst : CtEq C) : Prop where
-  ct_eq_spec : ∀ a b, inst.ct_eq a b ⦃ r => r = decide (a = b) ⦄
 
 @[step]
 theorem open_header_spec {A C : Type} {initI : AeadInit A} {ctI : CtEq C}

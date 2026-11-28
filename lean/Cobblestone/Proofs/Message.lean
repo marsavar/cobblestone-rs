@@ -50,17 +50,6 @@ def decryptFrom (dec : Decryptor A) (body : List U8) :
       | .Err e => ok (.Err e)
 termination_by body.length
 
--- The two AEAD properties the message theorems assume, on top of AeadTotal.
--- Both hold for AES-GCM as plain functional facts, without any cryptographic
--- assumption: decryption inverts encryption, and a tag is accepted only if it
--- equals the one encryption computes, so re-sealing an accepted plaintext
--- reproduces the same ciphertext and tag.
-structure AeadCorrect (aead : A) : Prop where
-  open_seal : ∀ n b t c, inst.seal aead n b = ok (t, c) → inst.open aead n c t = ok (true, b)
-
-structure AeadTagCheck (aead : A) : Prop where
-  seal_open : ∀ n c t b, inst.open aead n c t = ok (true, b) → inst.seal aead n b = ok (t, c)
-
 theorem opened_sealed (cipher : ChunkCipher A) (hC : AeadCorrect inst cipher.aead)
     (index : U64) (n : Std.Array U8 12#usize) (b c : Slice U8) (tag : Std.Array U8 16#usize)
     (hn : ChunkCipher.nonce inst cipher index = ok n)

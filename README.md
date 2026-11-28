@@ -84,43 +84,19 @@ I will do my best to address them.
 
 ## Formal verification
 
-The Rust code for the chunking layer, the header, and the streaming buffers
-is translated to Lean 4 with [Charon](https://github.com/AeneasVerif/charon)
-and [Aeneas](https://github.com/AeneasVerif/aeneas), and proved correct in
-[`lean/`](https://github.com/marsavar/cobblestone-rs/tree/main/lean). The
-Lean kernel checks the proofs, which depend only on Lean's standard axioms.
-They show that:
+The chunk layer, the header and the streaming buffers are translated from
+Rust to Lean 4 with [Charon](https://github.com/AeneasVerif/charon) and
+[Aeneas](https://github.com/AeneasVerif/aeneas), and proved to implement the
+specification, which is stated separately in Lean. Encryption produces exactly
+the specification's ciphertexts, decryption accepts exactly those and returns
+their message, and the streaming types match the in-memory functions however
+the data is split.
 
-- **Header:** HKDF-Expand computes RFC 5869 HKDF-Expand. The AEAD key, base
-  nonce, and commitment are derived as the specification says, with labels
-  that match it byte for byte. A header is accepted exactly when its
-  commitment matches the key, context, and salt.
-- **Chunks:** every chunk of a message gets a different nonce. Sizes, the
-  final chunk, and errors behave as specified, and decrypting an encrypted
-  message returns it.
-- **Integrity:** any ciphertext that decrypts successfully is exactly the
-  encryption of the plaintext it decrypts to. Truncation, reordering, dropped
-  or repeated chunks, and trailing data are always rejected.
-- **Streaming:** the streaming encryptors produce exactly the one-shot
-  ciphertext, and the streaming decryptor exactly the one-shot plaintext,
-  however the data is split into reads and writes. When streaming decryption
-  fails after the header has been accepted, one-shot decryption fails with the
-  same error.
-
-The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
-abstract functions with the expected behavior, for example that decrypting
-an encrypted chunk returns it. They don't prove that the RustCrypto
-implementations behave that way, or that the scheme is secure, which rests
-on the security of AES-GCM and HKDF. The loops of the in-memory `encrypt` and
-`decrypt` functions, and the loops in `src/stream.rs` that drive the streaming
-buffers, are mirrored by hand in Lean rather than translated. The proofs also
-don't cover how the streaming types read the header or handle I/O errors, the
-async wrappers, random access, constant-time execution, or zeroization.
-[Kani](https://github.com/model-checking/kani) proofs also check the
-chunking layer over every input.
-
+The proofs assume AES-GCM and HMAC-SHA-512 behave as specified, and don't
+verify the RustCrypto implementations, the scheme's cryptographic security,
+constant-time execution, random access, or the streaming types' I/O handling.
 See [Proofs](https://github.com/marsavar/cobblestone-rs/blob/main/docs.md#proofs)
-in the documentation for how to check them.
+for exactly what is proved and assumed, and how to check it.
 
 ## Acknowledgements
 

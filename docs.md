@@ -325,7 +325,45 @@ To run a single proof, add `--harness <name>`, for example `--harness nonces_are
 The chunk layer, the header and the stream buffering are translated to Lean 4
 by [Charon](https://github.com/AeneasVerif/charon) and
 [Aeneas](https://github.com/AeneasVerif/aeneas), and proved correct in `lean/`.
-The README lists what the proofs show and what they assume.
+The Lean kernel checks the proofs, which depend only on Lean's standard axioms.
+They show that:
+
+- **Specification:** encryption outputs exactly the ciphertext the
+  specification defines, which is stated in Lean directly from the
+  specification text, without reference to the code. Decryption accepts
+  exactly the specification's ciphertexts, and returns their message, so
+  truncation, reordering, dropped or repeated chunks, and trailing data are
+  always rejected.
+- **Header:** HKDF-Expand computes RFC 5869 HKDF-Expand, and a header is
+  accepted exactly when its commitment matches the key, context, and salt.
+- **Chunks:** every chunk of a message gets a different nonce, and sizes, the
+  final chunk, and errors behave as specified.
+- **Streaming:** the streaming encryptors produce exactly the one-shot
+  ciphertext, and the streaming decryptor exactly the one-shot plaintext,
+  however the data is split into reads and writes. When streaming decryption
+  fails after the header has been accepted, one-shot decryption fails with the
+  same error.
+
+The proofs treat AES-GCM, HMAC-SHA-512, and the constant-time comparison as
+abstract functions with the expected behavior, for example that decrypting
+an encrypted chunk returns it. They don't prove that the RustCrypto
+implementations behave that way, or that the scheme is secure, which rests
+on the security of AES-GCM and HKDF. The loops of the in-memory `encrypt` and
+`decrypt` functions, and the loops in `src/stream.rs` that drive the streaming
+buffers, are mirrored by hand in Lean rather than translated. The proofs also
+don't cover how the streaming types read the header or handle I/O errors, the
+async wrappers, random access, constant-time execution, or zeroization.
+
+These three files are the ones to review. Everything else only needs to be
+checked by Lean:
+
+| File | Contents |
+|---|---|
+| `lean/Cobblestone/Spec.lean` | The scheme, stated from the specification without reference to the code. |
+| `lean/Cobblestone/Assumptions.lean` | Everything the proofs assume about the primitives, and why each holds. |
+| `lean/Cobblestone/Theorems.lean` | The top-level results, stated in full. |
+
+The rest:
 
 | File | Contents |
 |---|---|
@@ -334,7 +372,9 @@ The README lists what the proofs show and what they assume.
 | `lean/Cobblestone/Proofs/Nonce.lean`, `Chunks.lean` | Nonces, and the encryptor and decryptor state machines. |
 | `lean/Cobblestone/Proofs/Message.lean`, `Full.lean` | Round trip and integrity of whole messages, with hand-written models of the loops of `encrypt` and `decrypt` in `src/lib.rs`. |
 | `lean/Cobblestone/Proofs/Header.lean` | HKDF-Expand, key derivation and the commitment check. |
-| `lean/Cobblestone/Proofs/Stream.lean` | Streaming output equals one-shot output, with hand-written models of the loops in `src/stream.rs`. |
+| `lean/Cobblestone/Proofs/Stream.lean`, `StreamMessage.lean` | Streaming output equals one-shot output, with hand-written models of the loops in `src/stream.rs`. |
+| `lean/Cobblestone/Proofs/Conformance.lean` | The code computes the specification. |
+| `lean/Cobblestone/Proofs/Consistency.lean` | The assumptions can all hold at once, so the theorems aren't vacuous. |
 
 Checking the proofs needs Lean's toolchain manager,
 [elan](https://github.com/leanprover/elan), which installs the Lean version
@@ -360,6 +400,27 @@ source the first time, which takes a while. If the Rust code starts using a
 standard library function Aeneas doesn't model, the script updates
 `FunsExternal_Template.lean`, and `FunsExternal.lean` needs a matching
 definition.
+
+#### What the proofs trust
+
+Besides the assumptions in `Assumptions.lean`, the results rest on:
+
+- **Charon and Aeneas** translating the Rust code faithfully, including its
+  integer overflow and panic behavior.
+- **Aeneas's Lean models of the Rust standard library** functions the code
+  uses: slice and array indexing and slicing, `copy_from_slice`, `split_at`,
+  `split_at_mut`, `to_be_bytes`, `min`, `checked_sub`, `clone`, integer
+  arithmetic and casts, conversions between slices and arrays, `expect`,
+  `unwrap`, and the `?` operator. They are definitions in
+  the Aeneas library, not axioms, so the axiom check doesn't flag them, but a
+  wrong one would make the model differ from the code.
+- **`FunsExternal.lean`**, the hand-written model of `Option::as_ref`, the one
+  standard library function Aeneas doesn't model here.
+- **The hand-written models of the loops** that drive the translated code:
+  those of `encrypt` and `decrypt` in `src/lib.rs` (`Proofs/Message.lean` and
+  `Proofs/Full.lean`), and those of `src/stream.rs` (`Proofs/Stream.lean`).
+  They must be kept in step with the Rust code by hand.
+- **The Lean kernel**, which checks every proof.
 
 CI checks that the committed model is what the script generates from the
 current Rust code, and that the proofs build and depend only on Lean's
