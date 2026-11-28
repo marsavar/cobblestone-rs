@@ -347,6 +347,7 @@ The rest:
 | `lean/Cobblestone/Proofs/Header.lean` | HKDF-Expand, key derivation and the commitment check. |
 | `lean/Cobblestone/Proofs/Stream.lean`, `StreamMessage.lean` | Streaming output equals one-shot output, with hand-written models of the loops in `src/stream.rs`. |
 | `lean/Cobblestone/Proofs/Conformance.lean` | The code computes the specification. |
+| `lean/Cobblestone/Proofs/Consistency.lean` | The assumptions can all hold at once, so the theorems aren't vacuous. |
 
 Checking the proofs needs Lean's toolchain manager,
 [elan](https://github.com/leanprover/elan), which installs the Lean version

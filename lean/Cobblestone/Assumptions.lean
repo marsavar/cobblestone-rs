@@ -27,7 +27,8 @@ assumption:
 - `AeadInitLaws`: creating the AEAD succeeds for a key of the right size.
 - `CtEqLaws`: the constant-time comparison returns equality.
 
-See `Theorems.lean` for what is proved from them.
+`Proofs/Consistency.lean` shows they can all hold at once, so the theorems that
+assume them are not vacuous. See `Theorems.lean` for what is proved from them.
 -/
 
 open Aeneas Aeneas.Std Result

@@ -14,3 +14,4 @@ public import Cobblestone.Assumptions
 public import Cobblestone.Proofs.Conformance
 public import Cobblestone.Proofs.StreamMessage
 public import Cobblestone.Theorems
+public import Cobblestone.Proofs.Consistency
