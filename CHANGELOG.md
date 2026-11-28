@@ -3,9 +3,13 @@
 ## [0.3.1](https://github.com/marsavar/cobblestone-rs/compare/v0.3.0...v0.3.1) (2026-11-28)
 
 
-### Miscellaneous Chores
+### Documentation
 
-* release 0.3.1 ([466150b](https://github.com/marsavar/cobblestone-rs/commit/466150b4526db020c8efabf420fa6fafc87b126d))
+* The chunk layer, the header and the streaming buffers are now formally
+  verified in Lean, including that encryption and decryption conform to a
+  Lean statement of the C2SP specification. See the README for what the
+  proofs cover and what they assume. The public API and the ciphertext
+  format are unchanged.
 
 ## [0.3.0](https://github.com/marsavar/cobblestone-rs/compare/v0.2.0...v0.3.0) (2026-11-15)
 
